@@ -3,21 +3,18 @@
     {
       "src": "frontend/package.json",
       "use": "@vercel/static-build",
-      "config": { "installCommand": "npm install", "buildCommand": "npm run build" }
+      "config": {
+        "installCommand": "npm install",
+        "buildCommand": "npm run build"
+      }
     },
     {
       "src": "api/main.py",
       "use": "@vercel/python"
     }
   ],
-  "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "api/main.py"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "frontend/build/index.html"
-    }
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/index/:path*" },
+    { "source": "/:path*", "destination": "/index.html" }
   ]
 }
