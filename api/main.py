@@ -1,7 +1,8 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 import os
+import logging
 
 try:
     # v2 Python client
@@ -9,7 +10,22 @@ try:
 except Exception:
     create_client = None  # Will raise at runtime if not installed
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("api")
+
 app = FastAPI()
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"{request.method} {request.url.path}")
+    try:
+        response = await call_next(request)
+        logger.info(f"-> {response.status_code} {request.method} {request.url.path}")
+        return response
+    except Exception as e:
+        logger.exception(f"Unhandled error for {request.method} {request.url.path}: {e}")
+        raise
 
 class FormData(BaseModel):
     name: str
@@ -31,6 +47,11 @@ class AuthData(BaseModel):
 @app.post("/auth")
 async def auth(data: AuthData):
     mode = data.mode.lower().strip()
+    # Log high-level auth intent without sensitive data
+    try:
+        logger.info(f"Auth request: mode={mode}, email={data.email}")
+    except Exception:
+        pass
     if mode not in {"login", "signup"}:
         raise HTTPException(status_code=400, detail="Invalid mode. Use 'login' or 'signup'.")
 
