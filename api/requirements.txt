@@ -1,1 +1,2 @@
 fastapi
+supabase>=2.4.0
