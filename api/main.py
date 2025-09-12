@@ -93,3 +93,9 @@ async def auth(data: AuthData):
     except Exception as e:
         # Bubble up as a 400 for auth failures
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# Fallback root handler to support platform rewrites that drop subpaths
+@app.post("/")
+async def auth_root(data: AuthData):
+    return await auth(data)

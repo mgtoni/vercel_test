@@ -27,7 +27,21 @@ function Form() {
           name: authMode === "signup" ? authName : undefined,
         }),
       });
-      const data = await response.json(); //Parses the JSON response from the backend
+      // Try to parse JSON; fall back to text for non-JSON errors
+      let data;
+      const raw = await response.text();
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = { error: "Non-JSON response", status: response.status, body: raw };
+      }
+
+      if (!response.ok) {
+        console.error("Auth HTTP error:", response.status, data);
+        setAuthResult(data);
+        return;
+      }
+
       setAuthResult(data); //Saves to React state for rendering
       console.log("Auth response:", data);
     } catch (err) {
