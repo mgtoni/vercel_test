@@ -7,7 +7,7 @@ class FormData(BaseModel):
     name: str
     email: str
 
-@app.post("/api/submit")
+@app.post("/submit")
 async def submit_form(data: FormData):
     print(f"Received data: {data}")
     return {"message": "Data received successfully"}
