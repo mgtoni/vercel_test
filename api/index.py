@@ -74,6 +74,64 @@ class AuthData(BaseModel):
     name: Optional[str] = None
 
 
+def _normalize_email(email: str) -> str:
+    try:
+        return (email or "").strip().lower()
+    except Exception:
+        return email
+
+
+def _check_email_exists(client, email: str) -> dict:
+    """Best-effort existence check in auth.users (admin) and profiles table.
+
+    Returns a dict {"in_users": bool, "in_profiles": bool}.
+    Never raises; logs and falls back to False if checks fail.
+    """
+    exists = {"in_users": False, "in_profiles": False}
+
+    # Check auth.users via Admin API if service role key is used
+    try:
+        # Some environments may not expose admin APIs when using anon key
+        admin = getattr(client.auth, "admin", None)
+        if admin is not None:
+            try:
+                res = admin.get_user_by_email(email)
+                # Different client versions may shape the response differently
+                user_obj = getattr(res, "user", None) or getattr(res, "data", None) or res
+                if user_obj:
+                    exists["in_users"] = True
+            except Exception as e:
+                # If it's a not-found, treat as False; otherwise log and continue
+                msg = str(e).lower()
+                if "not found" in msg or "no user" in msg:
+                    pass
+                else:
+                    logger.info(f"Admin get_user_by_email failed: {e}")
+    except Exception as e:
+        logger.info(f"Auth admin check unavailable: {e}")
+
+    # Check profiles table if present and email column exists
+    try:
+        try:
+            res = (
+                client.table("profiles")
+                .select("id")
+                .eq("email", email)
+                .limit(1)
+                .execute()
+            )
+            data = getattr(res, "data", None)
+            if isinstance(data, list) and len(data) > 0:
+                exists["in_profiles"] = True
+        except Exception as e:
+            # Table might not exist or column may differ; log and continue
+            logger.info(f"Profiles check failed: {e}")
+    except Exception as e:
+        logger.info(f"Profiles check unavailable: {e}")
+
+    return exists
+
+
 @app.post("/auth")
 async def auth(data: AuthData):
     mode = data.mode.lower().strip()
@@ -120,8 +178,19 @@ async def auth(data: AuthData):
                 "message": "Login successful" if session else "Login response received",
             }
         else:
+            # Normalize email before any checks
+            normalized_email = _normalize_email(data.email)
+
+            # Pre-check for existing email in auth.users and profiles
+            exists = _check_email_exists(client, normalized_email)
+            if exists.get("in_users") or exists.get("in_profiles"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Email already registered. Please log in instead.",
+                )
+
             payload = {
-                "email": data.email,
+                "email": normalized_email,
                 "password": data.password,
             }
             # Attach user metadata if name provided
@@ -142,8 +211,12 @@ async def auth(data: AuthData):
                 "message": "Signup initiated" if user else "Signup response received",
             }
     except Exception as e:
-        # Bubble up as a 400 for auth failures
-        raise HTTPException(status_code=400, detail=str(e))
+        # If Supabase indicates duplicate email, map to 409 with friendly message
+        msg = str(e)
+        if any(s in msg.lower() for s in ["already registered", "user exists", "duplicate", "email already in use"]):
+            raise HTTPException(status_code=409, detail="Email already registered. Please log in instead.")
+        # Bubble up as a 400 for other auth failures
+        raise HTTPException(status_code=400, detail=msg)
 
 
 # Fallback root handler to support platform rewrites that drop subpaths
