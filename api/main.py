@@ -120,3 +120,9 @@ async def auth(data: AuthData):
 @app.post("/")
 async def auth_root(data: AuthData):
     return await auth(data)
+
+
+# Catch-all POST to support rewrites preserving subpaths
+@app.post("/{_path:path}")
+async def auth_any_path(_path: str, data: AuthData):
+    return await auth(data)
