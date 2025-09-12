@@ -33,7 +33,11 @@ function Form() {
       try {
         data = raw ? JSON.parse(raw) : {};
       } catch {
-        data = { error: "Non-JSON response", status: response.status, body: raw };
+        data = {
+          error: "Non-JSON response",
+          status: response.status,
+          body: raw,
+        };
       }
 
       if (!response.ok) {
@@ -136,7 +140,9 @@ function Form() {
               padding: "0.5rem",
             }}
           >
-            {JSON.stringify(authResult, null, 2)}
+            {authResult.detail
+              ? authResult.detail
+              : JSON.stringify(authResult, null, 2)}
           </pre>
         )}
       </section>
