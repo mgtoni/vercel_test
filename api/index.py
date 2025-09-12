@@ -82,24 +82,14 @@ def _normalize_email(email: str) -> str:
 
 
 def _check_email_exists(client, email: str) -> dict:
-    """Best-effort existence check in auth.users (admin) and profiles table.
-
-    Returns a dict {"in_users": bool, "in_profiles": bool}.
-    Never raises; logs and falls back to False if checks fail.
-    """
     exists = {"in_users": False, "in_profiles": False}
-
-    # Check auth.users via Admin API if service role key is used
+   # Check auth.users via Admin API if service role key is used
     try:
         # Some environments may not expose admin APIs when using anon key
         admin = getattr(client.auth, "admin", None)
         if admin is not None:
             try:
-                res = admin.get_user_by_email(email)
-                # Different client versions may shape the response differently
-                user_obj = getattr(res, "user", None) or getattr(res, "data", None) or res
-                if user_obj:
-                    exists["in_users"] = True
+                matching = [u for u in admin.list_users() if u.email.lower() == email.lower()]
             except Exception as e:
                 # If it's a not-found, treat as False; otherwise log and continue
                 msg = str(e).lower()

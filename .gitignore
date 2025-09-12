@@ -12,3 +12,7 @@ __pycache__/
 # IDE
 .idea/
 .vscode/
+
+#Files
+/api/index2.py
+/scripts
