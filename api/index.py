@@ -64,7 +64,8 @@ class AuthData(BaseModel):
     mode: str  # 'login' or 'signup'
     email: str
     password: str
-    name: Optional[str] = None
+    first_name: str
+    last_name: str
 
 
 def _normalize_email(email: str) -> str:
@@ -154,48 +155,6 @@ def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: st
         return False
 
 
-def _fetch_profile_rest(supabase_url: str, service_key: str, user_id: Optional[str] = None, email: Optional[str] = None) -> Optional[dict]:
-    """Fetch a single profile row by user id or email using service role REST.
-
-    Returns a dict with at least {id, email, name} if found, else None.
-    """
-    if not service_key:
-        return None
-
-    try:
-        base = supabase_url.rstrip("/") + "/rest/v1/profiles"
-        params = {"select": "id,email,name", "limit": 1}
-        if user_id:
-            params["id"] = f"eq.{user_id}"
-        elif email:
-            params["email"] = f"eq.{email}"
-        else:
-            return None
-
-        q = _urlparse.urlencode(params)
-        url = f"{base}?{q}"
-        headers = {
-            "apikey": service_key,
-            "Authorization": f"Bearer {service_key}",
-            "Accept": "application/json",
-        }
-        req = _urlreq.Request(url, headers=headers, method="GET")
-        with _urlreq.urlopen(req, timeout=10) as resp:
-            body = resp.read().decode("utf-8")
-            data = _json.loads(body)
-            # REST returns a list
-            if isinstance(data, list) and data:
-                item = data[0]
-                return {
-                    "id": item.get("id"),
-                    "email": item.get("email"),
-                    "name": item.get("name"),
-                }
-    except Exception as e:
-        logger.info(f"Profile fetch failed: {e}")
-    return None
-
-
 def _fetch_profile_admin_sdk(supabase_url: str, service_key: str, user_id: Optional[str] = None, email: Optional[str] = None) -> Optional[dict]:
     """Fetch a single profile using the Supabase Python client with service role key.
 
@@ -205,22 +164,34 @@ def _fetch_profile_admin_sdk(supabase_url: str, service_key: str, user_id: Optio
         return None
     try:
         admin_client = create_client(supabase_url, service_key)
-        q = admin_client.table("profiles").select("id,email,name").limit(1)
-        if user_id:
-            q = q.eq("id", user_id)
-        elif email:
-            q = q.eq("email", email)
-        else:
-            return None
-        res = q.execute()
-        data = getattr(res, "data", None)
-        if isinstance(data, list) and data:
-            item = data[0]
-            return {
-                "id": item.get("id"),
-                "email": item.get("email"),
-                "name": item.get("name"),
-            }
+        # Try first_name/last_name first; fallback to full_name; final fallback to name
+        selectors = [
+            "id,first_name,last_name,full_name",
+            "id,full_name",
+            "id,name",
+        ]
+        for sel in selectors:
+            try:
+                q = admin_client.table("profiles").select(sel).limit(1)
+                if user_id:
+                    q = q.eq("id", user_id)
+                elif email:
+                    q = q.eq("email", email)
+                else:
+                    return None
+                res = q.execute()
+                data = getattr(res, "data", None)
+                if isinstance(data, list) and data:
+                    item = data[0]
+                    return {
+                        "id": item.get("id"),
+                        "first_name": item.get("first_name"),
+                        "last_name": item.get("last_name"),
+                        "full_name": item.get("full_name") or item.get("name"),
+                    }
+            except Exception as _e:
+                # try next selector
+                continue
     except Exception as e:
         logger.info(f"Profile fetch (SDK) failed: {e}")
     return None
@@ -290,33 +261,45 @@ async def auth(data: AuthData):
             })
             user = getattr(res, "user", None)
             session = getattr(res, "session", None)
-            # Try to enrich with profile name using SDK only (service role if available)
+            # Try to enrich with profile name (via service role REST if available)
             profile = None
             try:
                 uid = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None)
                 uemail = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None)
+                # Prefer SDK with service role
                 profile = _fetch_profile_admin_sdk(supabase_url, service_key, user_id=uid, email=uemail)
+                
             except Exception as e:
                 logger.info(f"Profile enrichment skipped: {e}")
+            # No REST fallback; SDK-only per requirements
             # Fallback to user metadata name if present
             user_meta_name = None
+            meta_dict = {}
             try:
                 if isinstance(user, dict):
-                    user_meta_name = (
-                        (user.get("user_metadata") or {}).get("name")
-                        or (user.get("app_metadata") or {}).get("name")
-                    )
+                    meta_dict = (user.get("user_metadata") or {})
+                    user_meta_name = meta_dict.get("name") or (" ".join([
+                        (meta_dict.get("first_name") or "").strip(),
+                        (meta_dict.get("last_name") or "").strip(),
+                    ])).strip()
                 else:
-                    meta = getattr(user, "user_metadata", None) or getattr(user, "app_metadata", None) or {}
-                    user_meta_name = getattr(meta, "get", lambda *_: None)("name") if isinstance(meta, dict) else None
+                    um = getattr(user, "user_metadata", None)
+                    if isinstance(um, dict):
+                        meta_dict = um
+                        user_meta_name = um.get("name") or (" ".join([
+                            (um.get("first_name") or "").strip(),
+                            (um.get("last_name") or "").strip(),
+                        ])).strip()
             except Exception:
                 user_meta_name = None
+            if user_meta_name and isinstance(meta_dict, dict) and "name" not in meta_dict:
+                meta_dict["name"] = user_meta_name
             return {
                 "mode": mode,
                 "user": {
                     "id": getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None),
                     "email": getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None),
-                    "user_metadata": {"name": user_meta_name} if user_meta_name else None,
+                    "user_metadata": (meta_dict if meta_dict else None),
                 } if user else None,
                 "session": {
                     "access_token": getattr(session, "access_token", None),
@@ -335,16 +318,49 @@ async def auth(data: AuthData):
                     detail="Email already registered. Please log in instead.",
                 )
 
+            # Enforce first_name and last_name on signup
+            if not (data.first_name and data.first_name.strip()) or not (data.last_name and data.last_name.strip()):
+                raise HTTPException(status_code=400, detail="first_name and last_name are required for signup")
+
             payload = {
                 "email": email,
                 "password": data.password,
             }
-            if data.name:
-                payload["options"] = {"data": {"name": data.name}}
+            metadata = {
+                "first_name": data.first_name.strip(),
+                "last_name": data.last_name.strip(),
+                "name": f"{data.first_name.strip()} {data.last_name.strip()}".strip(),
+            }
+            payload["options"] = {"data": metadata}
 
             res = public_client.auth.sign_up(payload)
             user = getattr(res, "user", None)
             session = getattr(res, "session", None)
+            # Create or update profiles row via admin client if available
+            try:
+                if service_key and user:
+                    admin_client = create_client(supabase_url, service_key)
+                    uid = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None)
+                    profile_payload = {
+                        "id": uid,
+                        "first_name": data.first_name.strip(),
+                        "last_name": data.last_name.strip(),
+                        "full_name": (f"{data.first_name.strip()} {data.last_name.strip()}").strip(),
+                    }
+                    try:
+                        admin_client.table("profiles").upsert(profile_payload).execute()
+                    except Exception:
+                        # fallback to only full_name for older schemas
+                        try:
+                            admin_client.table("profiles").upsert({
+                                "id": uid,
+                                "full_name": profile_payload["full_name"],
+                            }).execute()
+                        except Exception as e2:
+                            logger.info(f"Profiles upsert failed: {e2}
+")
+            except Exception as e:
+                logger.info(f"Profiles creation skipped: {e}")
             return {
                 "mode": mode,
                 "user": {"id": getattr(user, "id", None), "email": getattr(user, "email", None)} if user else None,

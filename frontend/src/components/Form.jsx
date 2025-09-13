@@ -10,7 +10,8 @@ function Form() {
   const [authMode, setAuthMode] = useState("login"); // 'login' | 'signup'
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
-  const [authName, setAuthName] = useState("");
+  const [authFirstName, setAuthFirstName] = useState("");
+  const [authLastName, setAuthLastName] = useState("");
   const [authResult, setAuthResult] = useState(null);
   const navigate = useNavigate();
 
@@ -26,7 +27,8 @@ function Form() {
           mode: authMode,
           email: authEmail,
           password: authPassword,
-          name: authMode === "signup" ? authName : undefined,
+          first_name: authMode === "signup" ? authFirstName : undefined,
+          last_name: authMode === "signup" ? authLastName : undefined,
         }),
       });
       // Try to parse JSON; fall back to text for non-JSON errors
@@ -53,13 +55,20 @@ function Form() {
 
       // On successful login, stash profile and go to /profile
       if (authMode === "login" && response.ok) {
-        const nameFromProfile = data.profile.name;
-        const nameFromMetadata = data.user.user_metadata.name;
-        const safeName = nameFromProfile || nameFromMetadata || "";
+        const fn =
+          data.profile.first_name || data.user.user_metadata.first_name || "";
+        const ln =
+          data.profile.last_name || data.user.user_metadata.last_name || "";
+        const safeName = `${fn} ${ln}`.trim();
         try {
           localStorage.setItem(
             "auth_profile",
-            JSON.stringify({ name: safeName, email: data.user.email || "" })
+            JSON.stringify({
+              first_name: fn,
+              last_name: ln,
+              name: safeName,
+              email: data.user.email || "",
+            })
           );
         } catch {}
         navigate("/profile");
@@ -111,16 +120,30 @@ function Form() {
 
         <form onSubmit={handleAuthSubmit}>
           {authMode === "signup" && (
-            <div style={{ marginBottom: "0.5rem" }}>
-              <label htmlFor="auth-name">Name:</label>
-              <input
-                type="text"
-                id="auth-name"
-                value={authName}
-                onChange={(e) => setAuthName(e.target.value)}
-                style={{ marginLeft: "0.5rem" }}
-              />
-            </div>
+            <>
+              <div style={{ marginBottom: "0.5rem" }}>
+                <label htmlFor="auth-first-name">Name:</label>
+                <input
+                  type="text"
+                  id="auth-first-name"
+                  value={authFirstName}
+                  onChange={(e) => setAuthFirstName(e.target.value)}
+                  style={{ marginLeft: "0.5rem" }}
+                  required
+                />
+              </div>
+              <div style={{ marginBottom: "0.5rem" }}>
+                <label htmlFor="auth-last-name">Surname:</label>
+                <input
+                  type="text"
+                  id="auth-last-name"
+                  value={authLastName}
+                  onChange={(e) => setAuthLastName(e.target.value)}
+                  style={{ marginLeft: "0.5rem" }}
+                  required
+                />
+              </div>
+            </>
           )}
           <div style={{ marginBottom: "0.5rem" }}>
             <label htmlFor="auth-email">Email:</label>

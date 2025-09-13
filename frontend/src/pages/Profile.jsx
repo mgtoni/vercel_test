@@ -1,26 +1,26 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState } from "react";
 
 function Profile() {
-  const [name, setName] = useState('');
+  const [displayName, setDisplayName] = useState("");
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem('auth_profile');
+      const raw = localStorage.getItem("auth_profile");
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed.name === 'string') {
-          setName(parsed.name);
-        }
+        const fn = parsed.first_name || "";
+        const ln = parsed.last_name || "";
+        const n = parsed.name || `${fn} ${ln}`.trim();
+        setDisplayName(n);
       }
     } catch {}
   }, []);
 
   return (
     <div>
-      <h1>{`Welcome ${name || ''}`.trim()}</h1>
+      <h1>{`Welcome ${displayName || ""}`.trim()}</h1>
     </div>
   );
 }
 
 export default Profile;
-
