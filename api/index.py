@@ -138,7 +138,7 @@ def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: st
                 return (data.get("email") or "").lower() == email.lower()
     except Exception as e:
         logger.info(f"Admin email filter unsupported or failed: {e}")
-
+'''
     # Fallback: list first page and filter client-side
     try:
         list_url = f"{base}?page=1&per_page=200"
@@ -152,7 +152,7 @@ def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: st
     except Exception as e:
         logger.info(f"Admin list users failed: {e}")
         return False
-
+'''
 
 def _check_email_exists_rest(public_client, supabase_url: str, service_key: str, email: str) -> dict:
     """Check if an email already exists in either auth.users or profiles.
