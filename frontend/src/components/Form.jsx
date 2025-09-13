@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 function Form() {
   // Existing form state
@@ -11,6 +12,7 @@ function Form() {
   const [authPassword, setAuthPassword] = useState("");
   const [authName, setAuthName] = useState("");
   const [authResult, setAuthResult] = useState(null);
+  const navigate = useNavigate();
 
   const handleAuthSubmit = async (e) => {
     //Handles the Account form submit for both login and signup modes.
@@ -48,6 +50,20 @@ function Form() {
 
       setAuthResult(data); //Saves to React state for rendering
       console.log("Auth response:", data);
+
+      // On successful login, stash profile and go to /profile
+      if (authMode === "login" && response.ok) {
+        const nameFromProfile = data.profile.name;
+        const nameFromMetadata = data.user.user_metadata.name;
+        const safeName = nameFromProfile || nameFromMetadata || "";
+        try {
+          localStorage.setItem(
+            "auth_profile",
+            JSON.stringify({ name: safeName, email: data.user.email || "" })
+          );
+        } catch {}
+        navigate("/profile");
+      }
     } catch (err) {
       console.error("Auth error:", err);
       setAuthResult({ error: "Request failed" });

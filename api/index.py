@@ -154,6 +154,48 @@ def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: st
         return False
 
 
+def _fetch_profile_rest(supabase_url: str, service_key: str, user_id: Optional[str] = None, email: Optional[str] = None) -> Optional[dict]:
+    """Fetch a single profile row by user id or email using service role REST.
+
+    Returns a dict with at least {id, email, name} if found, else None.
+    """
+    if not service_key:
+        return None
+
+    try:
+        base = supabase_url.rstrip("/") + "/rest/v1/profiles"
+        params = {"select": "id,email,name", "limit": 1}
+        if user_id:
+            params["id"] = f"eq.{user_id}"
+        elif email:
+            params["email"] = f"eq.{email}"
+        else:
+            return None
+
+        q = _urlparse.urlencode(params)
+        url = f"{base}?{q}"
+        headers = {
+            "apikey": service_key,
+            "Authorization": f"Bearer {service_key}",
+            "Accept": "application/json",
+        }
+        req = _urlreq.Request(url, headers=headers, method="GET")
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8")
+            data = _json.loads(body)
+            # REST returns a list
+            if isinstance(data, list) and data:
+                item = data[0]
+                return {
+                    "id": item.get("id"),
+                    "email": item.get("email"),
+                    "name": item.get("name"),
+                }
+    except Exception as e:
+        logger.info(f"Profile fetch failed: {e}")
+    return None
+
+
 def _check_email_exists_rest(public_client, supabase_url: str, service_key: str, email: str) -> dict:
     """Check if an email already exists in either auth.users or profiles.
 
@@ -218,6 +260,45 @@ async def auth(data: AuthData):
             })
             user = getattr(res, "user", None)
             session = getattr(res, "session", None)
+            # Try to enrich with profile name (via service role REST if available)
+            profile = None
+            try:
+                uid = getattr(user, "id", None)
+                uemail = getattr(user, "email", None)
+                profile = _fetch_profile_rest(supabase_url, service_key, user_id=uid, email=uemail)
+            except Exception as e:
+                logger.info(f"Profile enrichment skipped: {e}")
+            # If not found and we have a session, try with the user's access token (RLS)
+            try:
+                if not profile and session and getattr(session, "access_token", None):
+                    token = getattr(session, "access_token", None)
+                    base = supabase_url.rstrip("/") + "/rest/v1/profiles"
+                    params = {"select": "id,email,name", "limit": 1}
+                    if uid:
+                        params["id"] = f"eq.{uid}"
+                    elif uemail:
+                        params["email"] = f"eq.{uemail}"
+                    q = _urlparse.urlencode(params)
+                    url = f"{base}?{q}"
+                    anon_key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
+                    headers = {
+                        "apikey": anon_key,
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                    req = _urlreq.Request(url, headers=headers, method="GET")
+                    with _urlreq.urlopen(req, timeout=10) as resp:
+                        body = resp.read().decode("utf-8")
+                        data = _json.loads(body)
+                        if isinstance(data, list) and data:
+                            item = data[0]
+                            profile = {
+                                "id": item.get("id"),
+                                "email": item.get("email"),
+                                "name": item.get("name"),
+                            }
+            except Exception as e:
+                logger.info(f"Profile enrichment via token failed: {e}")
             return {
                 "mode": mode,
                 "user": {"id": getattr(user, "id", None), "email": getattr(user, "email", None)} if user else None,
@@ -226,6 +307,7 @@ async def auth(data: AuthData):
                     "token_type": getattr(session, "token_type", None),
                     "expires_in": getattr(session, "expires_in", None),
                 } if session else None,
+                "profile": profile,
                 "message": "Login successful" if session else "Login response received",
             }
         else:
