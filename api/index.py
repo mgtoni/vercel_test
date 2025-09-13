@@ -357,8 +357,7 @@ async def auth(data: AuthData):
                                 "full_name": profile_payload["full_name"],
                             }).execute()
                         except Exception as e2:
-                            logger.info(f"Profiles upsert failed: {e2}
-")
+                            logger.info(f"Profiles upsert failed: {e2}")
             except Exception as e:
                 logger.info(f"Profiles creation skipped: {e}")
             return {
