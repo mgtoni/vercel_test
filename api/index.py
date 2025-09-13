@@ -272,11 +272,12 @@ async def auth_root(data: AuthData):
     """Accept POSTs at the root and forward to `/auth` semantics."""
     return await auth(data)
 
-'''
+
 # Catch-all POST to support rewrites preserving subpaths
 @app.post("/{_path:path}")
 async def auth_any_path(_path: str, data: AuthData):
     """Accept POSTs at any subpath and forward to `auth`.
+    Doesn NOT work without this on Vercel !!!
 
     Useful when the hosting platform (e.g., Vercel) rewrites various
     `/api/:path*` routes to this function. This ensures clients can POST
@@ -291,4 +292,3 @@ async def auth_any_path(_path: str, data: AuthData):
 async def get_any_path(_path: str):
     """Simple GET responder for any path; helpful for routing checks."""
     return {"route": _path or "/", "message": "FastAPI index3 alive"}
-'''
