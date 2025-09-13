@@ -1,17 +1,11 @@
 from fastapi import FastAPI, HTTPException, Request
-from typing import Optional
+from pydantic import BaseModel
+from typing import Optional, Tuple
 import os
 import logging
-
-# Pydantic v1/v2 compatibility imports
-try:  # Prefer Pydantic v2 APIs
-    from pydantic import BaseModel, EmailStr
-    from pydantic import field_validator as _field_validator
-    _PD_V2 = True
-except Exception:  # Fallback to Pydantic v1
-    from pydantic import BaseModel, EmailStr
-    from pydantic import validator as _field_validator  # type: ignore
-    _PD_V2 = False
+import json as _json
+from urllib import request as _urlreq
+from urllib import parse as _urlparse
 
 try:
     # Supabase Python client (v2)
@@ -21,7 +15,7 @@ except Exception:
 
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("api2")
+logger = logging.getLogger("api3")
 
 app = FastAPI()
 
@@ -45,12 +39,11 @@ async def ping():
 
 @app.get("/")
 async def root():
-    return {"message": "FastAPI index2 root alive"}
+    return {"message": "FastAPI index3 root alive"}
 
 
 @app.get("/env-check")
 async def env_check():
-    # Do not leak values, only presence and length
     keys = [
         "SUPABASE_URL",
         "SUPABASE_ANON_KEY",
@@ -59,10 +52,7 @@ async def env_check():
     result = {}
     for k in keys:
         v = os.getenv(k)
-        result[k] = {
-            "present": bool(v),
-            "length": len(v) if v else 0,
-        }
+        result[k] = {"present": bool(v), "length": len(v) if v else 0}
     return result
 
 
@@ -77,6 +67,13 @@ async def submit_form(data: FormData):
     return {"message": "Data received successfully"}
 
 
+class AuthData(BaseModel):
+    mode: str  # 'login' or 'signup'
+    email: str
+    password: str
+    name: Optional[str] = None
+
+
 def _normalize_email(email: str) -> str:
     try:
         return (email or "").strip().lower()
@@ -84,44 +81,17 @@ def _normalize_email(email: str) -> str:
         return email
 
 
-class AuthData(BaseModel):
-    """Request body for authentication routes.
+def _build_supabase_public() -> Tuple[object, str, str]:
+    """Create a public Supabase client and return (client, service_key, supabase_url).
 
-    Improvements vs index.py:
-    - Uses EmailStr for basic email format validation
-    - Normalizes email to lowercase and trims whitespace via validator
-    """
-
-    mode: str  # 'login' or 'signup'
-    email: EmailStr
-    password: str
-    name: Optional[str] = None
-
-    if _PD_V2:
-        @_field_validator("email")  # type: ignore[misc]
-        @classmethod
-        def _normalize_email_v2(cls, v: EmailStr):
-            return EmailStr(_normalize_email(str(v)))
-    else:
-        @_field_validator("email", pre=True)  # type: ignore[misc]
-        def _normalize_email_v1(cls, v):  # type: ignore[no-redef]
-            try:
-                return _normalize_email(str(v))
-            except Exception:
-                return v
-
-
-def _build_supabase_clients():
-    """Create least-privilege and admin clients when possible.
-
-    Returns (public_client, admin_client, using_service_role: bool)
+    service_key is returned to enable admin REST calls when available; may be empty string.
     """
     if create_client is None:
         raise HTTPException(status_code=500, detail="Supabase client not installed on server.")
 
-    supabase_url = os.getenv("SUPABASE_URL")
-    anon_key = os.getenv("SUPABASE_ANON_KEY")
-    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    supabase_url = os.getenv("SUPABASE_URL") or ""
+    anon_key = os.getenv("SUPABASE_ANON_KEY") or ""
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
 
     if not supabase_url or not (anon_key or service_key):
         raise HTTPException(status_code=500, detail="Supabase environment not configured.")
@@ -129,60 +99,91 @@ def _build_supabase_clients():
     try:
         public_client = create_client(supabase_url, anon_key or service_key)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to initialize Supabase public client: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to initialize Supabase client: {e}")
 
-    admin_client = None
-    using_service = bool(service_key)
-    if service_key:
-        try:
-            admin_client = create_client(supabase_url, service_key)
-        except Exception as e:
-            # If admin client fails, continue with public-only
-            logger.info(f"Failed to initialize Supabase admin client: {e}")
-            admin_client = None
-            using_service = False
-
-    return public_client, admin_client, using_service
+    return public_client, service_key, supabase_url
 
 
-def _check_email_exists(admin_client, public_client, email: str) -> dict:
-    """Best-effort existence check in auth.users (admin) and profiles table.
+def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: str) -> bool:
+    """Use GoTrue Admin REST to check if a user exists by email.
 
-    - Uses admin API only when a service-role client is available
-    - Uses case-insensitive match (ilike) for profiles
+    Tries a direct email filter first; if unsupported, falls back to listing the first page
+    and filtering client-side. Returns True if a match is found (case-insensitive).
+    """
+    if not service_key:
+        return False
+
+    base = supabase_url.rstrip("/") + "/auth/v1/admin/users"
+    headers = {
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+    }
+    email_q = _urlparse.urlencode({"email": email})
+    url = f"{base}?{email_q}"
+
+    def _fetch_json(u: str):
+        req = _urlreq.Request(u, headers=headers, method="GET")
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            body = resp.read()
+            ct = resp.headers.get("content-type", "")
+            if "application/json" not in ct and not body.strip().startswith(b"{") and not body.strip().startswith(b"["):
+                raise ValueError("Non-JSON admin response")
+            return _json.loads(body.decode("utf-8"))
+
+    try:
+        data = _fetch_json(url)
+        # Possible shapes: list of users, or object with 'users'/'data'
+        if isinstance(data, list):
+            return any(((u.get("email") or "").lower() == email.lower()) for u in data)
+        if isinstance(data, dict):
+            arr = data.get("users") or data.get("data") or []
+            if isinstance(arr, list):
+                return any(((getattr(u, "email", None) or u.get("email") or "").lower() == email.lower()) for u in arr)
+            # If a single user object is returned
+            if data.get("email"):
+                return (data.get("email") or "").lower() == email.lower()
+    except Exception as e:
+        logger.info(f"Admin email filter unsupported or failed: {e}")
+
+    # Fallback: list first page and filter client-side
+    try:
+        list_url = f"{base}?page=1&per_page=200"
+        data = _fetch_json(list_url)
+        items = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("users") or data.get("data") or []
+        return any(((getattr(u, "email", None) or (u.get("email") if isinstance(u, dict) else None) or "").lower() == email.lower()) for u in items)
+    except Exception as e:
+        logger.info(f"Admin list users failed: {e}")
+        return False
+
+
+def _check_email_exists_rest(public_client, supabase_url: str, service_key: str, email: str) -> dict:
+    """Combined existence check using Admin REST and profiles table (case-insensitive).
+
     Returns: {"in_users": bool, "in_profiles": bool}
     """
     exists = {"in_users": False, "in_profiles": False}
 
-    # Check auth.users via Admin API only if we truly have admin client
-    if admin_client is not None:
-        try:
-            admin = getattr(admin_client.auth, "admin", None)
-            if admin is not None:
-                try:
-                    res = admin.get_user_by_email(email)
-                    user_obj = getattr(res, "user", None) or getattr(res, "data", None) or res
-                    if user_obj:
-                        exists["in_users"] = True
-                except Exception as e:
-                    msg = str(e).lower()
-                    if "not found" in msg or "no user" in msg:
-                        pass
-                    else:
-                        logger.info(f"Admin get_user_by_email failed: {e}")
-        except Exception as e:
-            logger.info(f"Auth admin check unavailable: {e}")
+    # Admin REST check (only if service key available)
+    try:
+        if service_key:
+            exists["in_users"] = _admin_get_user_by_email_rest(supabase_url, service_key, email)
+    except Exception as e:
+        logger.info(f"Admin REST check unavailable: {e}")
 
-    # Check profiles table (case-insensitive)
+    # profiles table check (prefer case-insensitive if supported)
     try:
         try:
-            res = (
-                public_client.table("profiles")
-                .select("id")
-                .ilike("email", email)  # case-insensitive exact match without wildcards
-                .limit(1)
-                .execute()
-            )
+            q = public_client.table("profiles").select("id").limit(1)
+            # try ilike if available
+            if hasattr(q, "ilike"):
+                q = q.ilike("email", email)
+            else:
+                q = q.eq("email", email)
+            res = q.execute()
             data = getattr(res, "data", None)
             if isinstance(data, list) and len(data) > 0:
                 exists["in_profiles"] = True
@@ -197,21 +198,21 @@ def _check_email_exists(admin_client, public_client, email: str) -> dict:
 @app.post("/auth")
 async def auth(data: AuthData):
     mode = (data.mode or "").lower().strip()
+    email = _normalize_email(data.email)
     try:
-        logger.info(f"Auth request: mode={mode}, email={data.email}")
+        logger.info(f"Auth request: mode={mode}, email={email}")
     except Exception:
         pass
 
     if mode not in {"login", "signup"}:
         raise HTTPException(status_code=400, detail="Invalid mode. Use 'login' or 'signup'.")
 
-    public_client, admin_client, using_service = _build_supabase_clients()
+    public_client, service_key, supabase_url = _build_supabase_public()
 
     try:
         if mode == "login":
-            # Email already normalized by validator
             res = public_client.auth.sign_in_with_password({
-                "email": str(data.email),
+                "email": email,
                 "password": data.password,
             })
             user = getattr(res, "user", None)
@@ -227,10 +228,8 @@ async def auth(data: AuthData):
                 "message": "Login successful" if session else "Login response received",
             }
         else:
-            normalized_email = str(data.email)  # already normalized by validator
-
             # Pre-check for existing email in auth.users and profiles
-            exists = _check_email_exists(admin_client, public_client, normalized_email)
+            exists = _check_email_exists_rest(public_client, supabase_url, service_key, email)
             if exists.get("in_users") or exists.get("in_profiles"):
                 raise HTTPException(
                     status_code=409,
@@ -238,7 +237,7 @@ async def auth(data: AuthData):
                 )
 
             payload = {
-                "email": normalized_email,
+                "email": email,
                 "password": data.password,
             }
             if data.name:
@@ -279,5 +278,5 @@ async def auth_any_path(_path: str, data: AuthData):
 # Also provide GET catch-all to confirm routing without requiring body
 @app.get("/{_path:path}")
 async def get_any_path(_path: str):
-    return {"route": _path or "/", "message": "FastAPI index2 alive"}
+    return {"route": _path or "/", "message": "FastAPI index3 alive"}
 
