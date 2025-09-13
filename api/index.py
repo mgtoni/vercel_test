@@ -138,7 +138,7 @@ def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: st
                 return (data.get("email") or "").lower() == email.lower()
     except Exception as e:
         logger.info(f"Admin email filter unsupported or failed: {e}")
-'''
+
     # Fallback: list first page and filter client-side
     try:
         list_url = f"{base}?page=1&per_page=200"
@@ -152,7 +152,7 @@ def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: st
     except Exception as e:
         logger.info(f"Admin list users failed: {e}")
         return False
-'''
+
 
 def _check_email_exists_rest(public_client, supabase_url: str, service_key: str, email: str) -> dict:
     """Check if an email already exists in either auth.users or profiles.
@@ -272,7 +272,7 @@ async def auth_root(data: AuthData):
     """Accept POSTs at the root and forward to `/auth` semantics."""
     return await auth(data)
 
-
+'''
 # Catch-all POST to support rewrites preserving subpaths
 @app.post("/{_path:path}")
 async def auth_any_path(_path: str, data: AuthData):
@@ -291,3 +291,4 @@ async def auth_any_path(_path: str, data: AuthData):
 async def get_any_path(_path: str):
     """Simple GET responder for any path; helpful for routing checks."""
     return {"route": _path or "/", "message": "FastAPI index3 alive"}
+'''
