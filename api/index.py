@@ -258,9 +258,10 @@ async def auth(data: AuthData):
                 "message": "Signup initiated" if user else "Signup response received",
             }
     except Exception as e:
-        msg = str(e)
-        if any(s in msg.lower() for s in ["already registered", "user exists", "duplicate", "email already in use"]):
-            raise HTTPException(status_code=409, detail="Email already registered. Please log in instead.")
+        raise HTTPException(status_code=409, detail=e)
+        #msg = str(e)
+        #if any(s in msg.lower() for s in ["already registered", "user exists", "duplicate", "email already in use"]):
+        #    raise HTTPException(status_code=409, detail="Email already registered. Please log in instead.")
         raise HTTPException(status_code=400, detail=msg)
 
 
