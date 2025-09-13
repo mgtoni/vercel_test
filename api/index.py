@@ -196,6 +196,36 @@ def _fetch_profile_rest(supabase_url: str, service_key: str, user_id: Optional[s
     return None
 
 
+def _fetch_profile_admin_sdk(supabase_url: str, service_key: str, user_id: Optional[str] = None, email: Optional[str] = None) -> Optional[dict]:
+    """Fetch a single profile using the Supabase Python client with service role key.
+
+    This avoids URL quirks with PostgREST and leverages the SDK.
+    """
+    if not service_key or create_client is None:
+        return None
+    try:
+        admin_client = create_client(supabase_url, service_key)
+        q = admin_client.table("profiles").select("id,email,name").limit(1)
+        if user_id:
+            q = q.eq("id", user_id)
+        elif email:
+            q = q.eq("email", email)
+        else:
+            return None
+        res = q.execute()
+        data = getattr(res, "data", None)
+        if isinstance(data, list) and data:
+            item = data[0]
+            return {
+                "id": item.get("id"),
+                "email": item.get("email"),
+                "name": item.get("name"),
+            }
+    except Exception as e:
+        logger.info(f"Profile fetch (SDK) failed: {e}")
+    return None
+
+
 def _check_email_exists_rest(public_client, supabase_url: str, service_key: str, email: str) -> dict:
     """Check if an email already exists in either auth.users or profiles.
 
@@ -260,48 +290,34 @@ async def auth(data: AuthData):
             })
             user = getattr(res, "user", None)
             session = getattr(res, "session", None)
-            # Try to enrich with profile name (via service role REST if available)
+            # Try to enrich with profile name using SDK only (service role if available)
             profile = None
             try:
-                uid = getattr(user, "id", None)
-                uemail = getattr(user, "email", None)
-                profile = _fetch_profile_rest(supabase_url, service_key, user_id=uid, email=uemail)
+                uid = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None)
+                uemail = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None)
+                profile = _fetch_profile_admin_sdk(supabase_url, service_key, user_id=uid, email=uemail)
             except Exception as e:
                 logger.info(f"Profile enrichment skipped: {e}")
-            # If not found and we have a session, try with the user's access token (RLS)
+            # Fallback to user metadata name if present
+            user_meta_name = None
             try:
-                if not profile and session and getattr(session, "access_token", None):
-                    token = getattr(session, "access_token", None)
-                    base = supabase_url.rstrip("/") + "/rest/v1/profiles"
-                    params = {"select": "id,email,name", "limit": 1}
-                    if uid:
-                        params["id"] = f"eq.{uid}"
-                    elif uemail:
-                        params["email"] = f"eq.{uemail}"
-                    q = _urlparse.urlencode(params)
-                    url = f"{base}?{q}"
-                    anon_key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
-                    headers = {
-                        "apikey": anon_key,
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/json",
-                    }
-                    req = _urlreq.Request(url, headers=headers, method="GET")
-                    with _urlreq.urlopen(req, timeout=10) as resp:
-                        body = resp.read().decode("utf-8")
-                        data = _json.loads(body)
-                        if isinstance(data, list) and data:
-                            item = data[0]
-                            profile = {
-                                "id": item.get("id"),
-                                "email": item.get("email"),
-                                "name": item.get("name"),
-                            }
-            except Exception as e:
-                logger.info(f"Profile enrichment via token failed: {e}")
+                if isinstance(user, dict):
+                    user_meta_name = (
+                        (user.get("user_metadata") or {}).get("name")
+                        or (user.get("app_metadata") or {}).get("name")
+                    )
+                else:
+                    meta = getattr(user, "user_metadata", None) or getattr(user, "app_metadata", None) or {}
+                    user_meta_name = getattr(meta, "get", lambda *_: None)("name") if isinstance(meta, dict) else None
+            except Exception:
+                user_meta_name = None
             return {
                 "mode": mode,
-                "user": {"id": getattr(user, "id", None), "email": getattr(user, "email", None)} if user else None,
+                "user": {
+                    "id": getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None),
+                    "email": getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None),
+                    "user_metadata": {"name": user_meta_name} if user_meta_name else None,
+                } if user else None,
                 "session": {
                     "access_token": getattr(session, "access_token", None),
                     "token_type": getattr(session, "token_type", None),
