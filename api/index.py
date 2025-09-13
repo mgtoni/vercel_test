@@ -22,6 +22,12 @@ app = FastAPI()
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    """Simple request logging middleware.
+
+    - Logs the incoming method + path for every request.
+    - Calls the downstream handler and logs the final status code.
+    - Captures and logs unhandled exceptions before re-raising.
+    """
     logger.info(f"{request.method} {request.url.path}")
     try:
         response = await call_next(request)
@@ -32,28 +38,14 @@ async def log_requests(request: Request, call_next):
         raise
 
 
-@app.get("/ping")
-async def ping():
-    return {"ok": True}
-
-
 @app.get("/")
 async def root():
+    """Basic liveness endpoint for the function root.
+
+    Note: This is reachable at the function base path (e.g. `/api`).
+    """
     return {"message": "FastAPI index3 root alive"}
 
-
-@app.get("/env-check")
-async def env_check():
-    keys = [
-        "SUPABASE_URL",
-        "SUPABASE_ANON_KEY",
-        "SUPABASE_SERVICE_ROLE_KEY",
-    ]
-    result = {}
-    for k in keys:
-        v = os.getenv(k)
-        result[k] = {"present": bool(v), "length": len(v) if v else 0}
-    return result
 
 
 class FormData(BaseModel):
@@ -63,6 +55,7 @@ class FormData(BaseModel):
 
 @app.post("/submit")
 async def submit_form(data: FormData):
+    """Example form endpoint used by the frontend demo."""
     logger.info(f"Received data: {data}")
     return {"message": "Data received successfully"}
 
@@ -105,10 +98,11 @@ def _build_supabase_public() -> Tuple[object, str, str]:
 
 
 def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: str) -> bool:
-    """Use GoTrue Admin REST to check if a user exists by email.
+    """Check auth.users for a matching email via GoTrue Admin REST.
 
-    Tries a direct email filter first; if unsupported, falls back to listing the first page
-    and filtering client-side. Returns True if a match is found (case-insensitive).
+    - If a direct `?email=` filter is supported by the deployment, use it.
+    - Otherwise, fetch the first page of users and filter by email locally.
+    - Returns True if a case-insensitive match is found; False otherwise.
     """
     if not service_key:
         return False
@@ -161,9 +155,11 @@ def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: st
 
 
 def _check_email_exists_rest(public_client, supabase_url: str, service_key: str, email: str) -> dict:
-    """Combined existence check using Admin REST and profiles table (case-insensitive).
+    """Check if an email already exists in either auth.users or profiles.
 
-    Returns: {"in_users": bool, "in_profiles": bool}
+    - Uses Admin REST (if `service_key` is available) to search `auth.users`.
+    - Queries the `profiles` table via the public client using `ilike` if supported.
+    - Returns a dict: {"in_users": bool, "in_profiles": bool}.
     """
     exists = {"in_users": False, "in_profiles": False}
 
@@ -197,6 +193,11 @@ def _check_email_exists_rest(public_client, supabase_url: str, service_key: str,
 
 @app.post("/auth")
 async def auth(data: AuthData):
+    """Unified auth endpoint for login and signup.
+
+    - `mode == "login"`: calls Supabase `sign_in_with_password`.
+    - `mode == "signup"`: pre-checks for existing email, then calls `sign_up`.
+    """
     mode = (data.mode or "").lower().strip()
     email = _normalize_email(data.email)
     try:
@@ -266,17 +267,25 @@ async def auth(data: AuthData):
 # Fallback root handler to support platform rewrites that drop subpaths
 @app.post("/")
 async def auth_root(data: AuthData):
+    """Accept POSTs at the root and forward to `/auth` semantics."""
     return await auth(data)
 
 
 # Catch-all POST to support rewrites preserving subpaths
 @app.post("/{_path:path}")
 async def auth_any_path(_path: str, data: AuthData):
+    """Accept POSTs at any subpath and forward to `auth`.
+
+    Useful when the hosting platform (e.g., Vercel) rewrites various
+    `/api/:path*` routes to this function. This ensures clients can POST
+    to alternate paths (like `/api/login` or `/api/signup`) and still hit
+    the same handler.
+    """
     return await auth(data)
 
 
 # Also provide GET catch-all to confirm routing without requiring body
 @app.get("/{_path:path}")
 async def get_any_path(_path: str):
+    """Simple GET responder for any path; helpful for routing checks."""
     return {"route": _path or "/", "message": "FastAPI index3 alive"}
-
