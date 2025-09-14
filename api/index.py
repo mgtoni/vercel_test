@@ -64,8 +64,8 @@ class AuthData(BaseModel):
     mode: str  # 'login' or 'signup'
     email: str
     password: str
-    first_name: str
-    last_name: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
 
 
 def _normalize_email(email: str) -> str:

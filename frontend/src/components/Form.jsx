@@ -179,9 +179,16 @@ function Form() {
               padding: "0.5rem",
             }}
           >
-            {authResult.detail
-              ? authResult.detail
-              : JSON.stringify(authResult, null, 2)}
+            {(() => {
+              const d = authResult.detail;
+              if (d === undefined || d === null) {
+                return JSON.stringify(authResult, null, 2);
+              }
+              if (typeof d === "string" || typeof d === "number") {
+                return String(d);
+              }
+              return JSON.stringify(d, null, 2);
+            })()}
           </pre>
         )}
       </section>
