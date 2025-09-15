@@ -15,3 +15,10 @@ __pycache__/
 
 #Files
 /api/index2.py
+/.env
+/.env.local
+/.env.*
+!/.env.example
+
+# Keys (do not commit private keys)
+/api/keys/

@@ -5,7 +5,7 @@ function Profile() {
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem("auth_profile");
+      const raw = sessionStorage.getItem("auth_profile");
       if (raw) {
         const parsed = JSON.parse(raw);
         const fn = parsed.first_name || "";

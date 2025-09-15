@@ -1,5 +1,7 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { encryptAuthPayload } from "../utils/crypto";
+import { maskEmail, maskName, maskFullName } from "../utils/mask";
 
 function Form() {
   // Existing form state
@@ -19,17 +21,32 @@ function Form() {
     //Handles the Account form submit for both login and signup modes.
     e.preventDefault(); //Stops the browser’s default form submission.
     try {
+      // Build auth payload and encrypt sensitive fields when configured
+      const plain = {
+        email: authEmail,
+        password: authPassword,
+        ...(authMode === "signup"
+          ? { first_name: authFirstName, last_name: authLastName }
+          : {}),
+      };
+      const enc = await encryptAuthPayload(plain);
+
       const response = await fetch("/api/auth", {
         //Sends the request to the backend
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: authMode,
-          email: authEmail,
-          password: authPassword,
-          first_name: authMode === "signup" ? authFirstName : undefined,
-          last_name: authMode === "signup" ? authLastName : undefined,
-        }),
+        body: JSON.stringify(
+          enc
+            ? { mode: authMode, enc }
+            : {
+                // Fallback (if encryption not configured); not recommended
+                mode: authMode,
+                email: authEmail,
+                password: authPassword,
+                first_name: authMode === "signup" ? authFirstName : undefined,
+                last_name: authMode === "signup" ? authLastName : undefined,
+              }
+        ),
       });
       // Try to parse JSON; fall back to text for non-JSON errors
       let data;
@@ -56,19 +73,25 @@ function Form() {
       // On successful login, stash profile and go to /profile
       if (authMode === "login" && response.ok) {
         const fn =
-          data.profile.first_name || data.user.user_metadata.first_name || "";
+          (data.profile && data.profile.first_name) ||
+          (data.user && data.user.user_metadata && data.user.user_metadata.first_name) ||
+          "";
         const ln =
-          data.profile.last_name || data.user.user_metadata.last_name || "";
+          (data.profile && data.profile.last_name) ||
+          (data.user && data.user.user_metadata && data.user.user_metadata.last_name) ||
+          "";
         const safeName = `${fn} ${ln}`.trim();
+        // Mask before storing to localStorage
+        const masked = {
+          first_name: fn ? `${fn.slice(0, 1)}***` : "",
+          last_name: ln ? `${ln.slice(0, 1)}***` : "",
+          name: safeName ? maskFullName(safeName) : maskName(fn, ln),
+          email: data.user && data.user.email ? maskEmail(data.user.email) : "",
+        };
         try {
-          localStorage.setItem(
+          sessionStorage.setItem(
             "auth_profile",
-            JSON.stringify({
-              first_name: fn,
-              last_name: ln,
-              name: safeName,
-              email: data.user.email || "",
-            })
+            JSON.stringify(masked)
           );
         } catch {}
         navigate("/profile");

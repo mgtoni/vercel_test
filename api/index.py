@@ -1,11 +1,21 @@
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 import os
 import logging
 import json as _json
 from urllib import request as _urlreq
 from urllib import parse as _urlparse
+import base64 as _b64
+
+try:
+    # RSA decryption for client-side encrypted payloads
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.backends import default_backend
+except Exception:
+    serialization = None
 
 try:
     # Supabase Python client (v2)
@@ -55,10 +65,13 @@ class FormData(BaseModel):
 
 class AuthData(BaseModel):
     mode: str  # 'login' or 'signup'
-    email: str
-    password: str
+    # Plain fields (backwards compatibility); avoided when `enc` provided
+    email: Optional[str] = None
+    password: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    # Encrypted compact payload (base64-encoded RSA-OAEP)
+    enc: Optional[str] = None
 
 
 def _normalize_email(email: str) -> str:
@@ -88,6 +101,80 @@ def _build_supabase_public() -> Tuple[object, str, str]:
         raise HTTPException(status_code=500, detail=f"Failed to initialize Supabase client: {e}")
 
     return public_client, service_key, supabase_url
+
+
+def _load_private_key() -> Optional[object]:
+    """Load RSA private key from env var `AUTH_PRIVATE_KEY_PEM` or `api/keys/private_key.pem`.
+
+    Returns a cryptography private key object, or None if unavailable.
+    """
+    if serialization is None:
+        return None
+    pem = os.getenv("AUTH_PRIVATE_KEY_PEM")
+    if pem:
+        try:
+            # Support envs that store PEM with escaped newlines
+            if "\\n" in pem and "\n" not in pem:
+                pem = pem.replace("\\n", "\n")
+            key = serialization.load_pem_private_key(
+                pem.encode("utf-8"), password=None, backend=default_backend()
+            )
+            return key
+        except Exception:
+            pass
+    # Try file fallback
+    file_path = os.path.join(os.path.dirname(__file__), "keys", "private_key.pem")
+    try:
+        if os.path.exists(file_path):
+            with open(file_path, "rb") as f:
+                key = serialization.load_pem_private_key(
+                    f.read(), password=None, backend=default_backend()
+                )
+                return key
+    except Exception:
+        pass
+    return None
+
+
+def _decrypt_auth_payload(enc_b64: str) -> Optional[Dict[str, Any]]:
+    """Decrypt base64-encoded RSA-OAEP (SHA-256) payload containing JSON.
+
+    Expected JSON shape: { email, password, first_name?, last_name? }
+    Returns dict or None if decryption fails or key missing.
+    """
+    try:
+        if not enc_b64:
+            return None
+        priv = _load_private_key()
+        if priv is None:
+            logger.warning("AUTH_PRIVATE_KEY not available; cannot decrypt 'enc' payload")
+            return None
+        ciphertext = _b64.b64decode(enc_b64)
+        plaintext = priv.decrypt(
+            ciphertext,
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+        )
+        data = _json.loads(plaintext.decode("utf-8"))
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception as e:
+        logger.info(f"Decryption failed: {e}")
+        return None
+
+
+def _mask_email_for_log(email: str) -> str:
+    try:
+        if not email:
+            return ""
+        parts = email.split("@", 1)
+        user = parts[0]
+        domain = parts[1] if len(parts) > 1 else ""
+        first = (user[:1] or "*")
+        last = (user[-1:] or "*")
+        return f"{first}***{last}@{domain}" if domain else f"{first}***{last}"
+    except Exception:
+        return "***"
 
 
 def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: str) -> bool:
@@ -213,9 +300,16 @@ async def auth(data: AuthData):
     - `mode == "signup"`: pre-checks for existing email, then calls `sign_up`.
     """
     mode = (data.mode or "").lower().strip()
-    email = _normalize_email(data.email)
+    # Prefer encrypted payload when available
+    decrypted = _decrypt_auth_payload(data.enc) if getattr(data, "enc", None) else None
+    if getattr(data, "enc", None) and decrypted is None:
+        raise HTTPException(status_code=400, detail="Invalid encrypted payload")
+    email = _normalize_email((decrypted or {}).get("email") or (data.email or ""))
+    password = (decrypted or {}).get("password") or data.password or ""
+    first_name = (decrypted or {}).get("first_name") or data.first_name
+    last_name = (decrypted or {}).get("last_name") or data.last_name
     try:
-        logger.info(f"Auth request: mode={mode}, email={email}")
+        logger.info(f"Auth request: mode={mode}, email={_mask_email_for_log(email)}")
     except Exception:
         pass
 
@@ -228,7 +322,7 @@ async def auth(data: AuthData):
         if mode == "login":
             res = public_client.auth.sign_in_with_password({
                 "email": email,
-                "password": data.password,
+                "password": password,
             })
             user = getattr(res, "user", None)
             session = getattr(res, "session", None)
@@ -289,17 +383,17 @@ async def auth(data: AuthData):
                 )
 
             # Enforce first_name and last_name on signup
-            if not (data.first_name and data.first_name.strip()) or not (data.last_name and data.last_name.strip()):
+            if not (first_name and str(first_name).strip()) or not (last_name and str(last_name).strip()):
                 raise HTTPException(status_code=400, detail="first_name and last_name are required for signup")
 
             payload = {
                 "email": email,
-                "password": data.password,
+                "password": password,
             }
             metadata = {
-                "first_name": data.first_name.strip(),
-                "last_name": data.last_name.strip(),
-                "name": f"{data.first_name.strip()} {data.last_name.strip()}".strip(),
+                "first_name": str(first_name).strip(),
+                "last_name": str(last_name).strip(),
+                "name": f"{str(first_name).strip()} {str(last_name).strip()}".strip(),
             }
             payload["options"] = {"data": metadata}
 
@@ -313,9 +407,9 @@ async def auth(data: AuthData):
                     uid = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None)
                     profile_payload = {
                         "id": uid,
-                        "first_name": data.first_name.strip(),
-                        "last_name": data.last_name.strip(),
-                        "full_name": (f"{data.first_name.strip()} {data.last_name.strip()}").strip(),
+                        "first_name": str(first_name).strip(),
+                        "last_name": str(last_name).strip(),
+                        "full_name": (f"{str(first_name).strip()} {str(last_name).strip()}").strip(),
                     }
                     try:
                         admin_client.table("profiles").upsert(profile_payload).execute()
