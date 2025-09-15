@@ -52,3 +52,31 @@ export async function encryptAuthPayload(fields) {
     return null;
   }
 }
+
+// AES-GCM helpers for encrypting/decrypting small JSON payloads
+export function bytesToB64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+export function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+export function generateAesKeyRaw() {
+  const key = new Uint8Array(32);
+  crypto.getRandomValues(key);
+  return key;
+}
+
+export async function aesGcmDecryptJson(keyBytes, ivBytes, b64Ciphertext) {
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
+  const ct = b64ToBytes(b64Ciphertext);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivBytes }, key, ct);
+  const txt = new TextDecoder().decode(new Uint8Array(pt));
+  return JSON.parse(txt);
+}

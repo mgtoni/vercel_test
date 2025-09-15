@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { encryptAuthPayload } from "../utils/crypto";
-import { maskEmail, maskName, maskFullName } from "../utils/mask";
+import { encryptAuthPayload, generateAesKeyRaw, bytesToB64, b64ToBytes, aesGcmDecryptJson } from "../utils/crypto";
 
 function Form() {
   // Existing form state
@@ -22,12 +21,18 @@ function Form() {
     e.preventDefault(); //Stops the browser’s default form submission.
     try {
       // Build auth payload and encrypt sensitive fields when configured
+      // Generate a per-login return key to encrypt PII in the response
+      const rtkBytes = generateAesKeyRaw();
+      const rtkB64 = bytesToB64(rtkBytes);
+
       const plain = {
         email: authEmail,
         password: authPassword,
         ...(authMode === "signup"
           ? { first_name: authFirstName, last_name: authLastName }
           : {}),
+        // Ask server to encrypt PII back to us using this key
+        rtk: rtkB64,
       };
       const enc = await encryptAuthPayload(plain);
 
@@ -67,34 +72,27 @@ function Form() {
         return;
       }
 
-      setAuthResult(data); //Saves to React state for rendering
-      console.log("Auth response:", data);
+      setAuthResult({ ...data, enc_profile: data?.enc_profile ? "<encrypted>" : undefined });
 
       // On successful login, stash profile and go to /profile
       if (authMode === "login" && response.ok) {
-        const fn =
-          (data.profile && data.profile.first_name) ||
-          (data.user && data.user.user_metadata && data.user.user_metadata.first_name) ||
-          "";
-        const ln =
-          (data.profile && data.profile.last_name) ||
-          (data.user && data.user.user_metadata && data.user.user_metadata.last_name) ||
-          "";
-        const safeName = `${fn} ${ln}`.trim();
-        // Mask before storing to localStorage
-        const masked = {
-          first_name: fn ? `${fn.slice(0, 1)}***` : "",
-          last_name: ln ? `${ln.slice(0, 1)}***` : "",
-          name: safeName ? maskFullName(safeName) : maskName(fn, ln),
-          email: data.user && data.user.email ? maskEmail(data.user.email) : "",
-        };
+        // Decrypt enc_profile using the return key
+        let fullName = "";
         try {
-          sessionStorage.setItem(
-            "auth_profile",
-            JSON.stringify(masked)
-          );
-        } catch {}
-        navigate("/profile");
+          if (data.enc_profile && data.iv) {
+            const ivBytes = b64ToBytes(data.iv);
+            const dec = await aesGcmDecryptJson(rtkBytes, ivBytes, data.enc_profile);
+            const fn = dec.first_name || "";
+            const ln = dec.last_name || "";
+            fullName = dec.name || `${fn} ${ln}`.trim();
+          }
+        } catch (e) {
+          console.warn("Failed to decrypt profile:", e);
+        }
+        // Persist only the AES return key so we can re-fetch on reload
+        try { sessionStorage.setItem("auth_rtk", rtkB64); } catch {}
+        // Pass the full name through navigation state but do not persist the name
+        navigate("/profile", { state: { fullName } });
       }
     } catch (err) {
       console.error("Auth error:", err);

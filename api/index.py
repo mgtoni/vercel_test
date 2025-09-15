@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 from typing import Optional, Tuple, Dict, Any
 import os
@@ -14,6 +14,7 @@ try:
     from cryptography.hazmat.primitives.asymmetric import padding
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 except Exception:
     serialization = None
 
@@ -72,6 +73,10 @@ class AuthData(BaseModel):
     last_name: Optional[str] = None
     # Encrypted compact payload (base64-encoded RSA-OAEP)
     enc: Optional[str] = None
+
+
+class ProfileReq(BaseModel):
+    rtk: str  # base64 AES key from client
 
 
 def _normalize_email(email: str) -> str:
@@ -175,6 +180,27 @@ def _mask_email_for_log(email: str) -> str:
         return f"{first}***{last}@{domain}" if domain else f"{first}***{last}"
     except Exception:
         return "***"
+
+
+def _aesgcm_encrypt_profile(return_key_b64: Optional[str], profile: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Encrypt profile dict with AES-GCM using a base64 return key from client.
+
+    Returns dict with 'enc_profile' (base64) and 'iv' (base64) or None.
+    """
+    try:
+        if not return_key_b64 or AESGCM is None:
+            return None
+        key = _b64.b64decode(return_key_b64)
+        if len(key) not in (16, 24, 32):
+            return None
+        aesgcm = AESGCM(key)
+        iv = os.urandom(12)
+        plaintext = _json.dumps(profile).encode("utf-8")
+        ct = aesgcm.encrypt(iv, plaintext, associated_data=None)
+        return {"enc_profile": _b64.b64encode(ct).decode("utf-8"), "iv": _b64.b64encode(iv).decode("utf-8"), "alg": "AES-GCM"}
+    except Exception as e:
+        logger.info(f"AES-GCM encrypt failed: {e}")
+        return None
 
 
 def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: str) -> bool:
@@ -293,7 +319,7 @@ def _check_email_exists_rest(public_client, supabase_url: str, service_key: str,
 
 
 @app.post("/auth")
-async def auth(data: AuthData):
+async def auth(data: AuthData, response: Response):
     """Unified auth endpoint for login and signup.
 
     - `mode == "login"`: calls Supabase `sign_in_with_password`.
@@ -308,6 +334,7 @@ async def auth(data: AuthData):
     password = (decrypted or {}).get("password") or data.password or ""
     first_name = (decrypted or {}).get("first_name") or data.first_name
     last_name = (decrypted or {}).get("last_name") or data.last_name
+    return_key_b64 = (decrypted or {}).get("rtk") or None
     try:
         logger.info(f"Auth request: mode={mode}, email={_mask_email_for_log(email)}")
     except Exception:
@@ -359,19 +386,50 @@ async def auth(data: AuthData):
                 user_meta_name = None
             if user_meta_name and isinstance(meta_dict, dict) and "name" not in meta_dict:
                 meta_dict["name"] = user_meta_name
+            # Build PII object, but do not include plaintext in response
+            fn = (profile or {}).get("first_name") or (meta_dict or {}).get("first_name") or None
+            ln = (profile or {}).get("last_name") or (meta_dict or {}).get("last_name") or None
+            full_name = None
+            if (profile or {}).get("full_name"):
+                full_name = (profile or {}).get("full_name")
+            elif (meta_dict or {}).get("name"):
+                full_name = (meta_dict or {}).get("name")
+            else:
+                full_name = (f"{(fn or '').strip()} {(ln or '').strip()}").strip()
+
+            pii = {
+                "first_name": fn,
+                "last_name": ln,
+                "name": full_name,
+                # Avoid returning email in plaintext
+                "email": getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None),
+            }
+            enc_blob = _aesgcm_encrypt_profile(return_key_b64, pii)
+            # Set a session cookie with Supabase access token (session cookie, HttpOnly)
+            try:
+                if session and getattr(session, "access_token", None):
+                    response.set_cookie(
+                        key="sb_access_token",
+                        value=getattr(session, "access_token"),
+                        httponly=True,
+                        secure=True,
+                        samesite="lax",
+                        path="/",
+                    )
+            except Exception:
+                pass
+            # Response omits plaintext PII and user_metadata
             return {
                 "mode": mode,
                 "user": {
                     "id": getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None),
-                    "email": getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None),
-                    "user_metadata": (meta_dict if meta_dict else None),
                 } if user else None,
                 "session": {
                     "access_token": getattr(session, "access_token", None),
                     "token_type": getattr(session, "token_type", None),
                     "expires_in": getattr(session, "expires_in", None),
                 } if session else None,
-                "profile": profile,
+                **({"enc_profile": enc_blob["enc_profile"], "iv": enc_blob["iv"], "alg": enc_blob.get("alg", "AES-GCM")} if enc_blob else {}),
                 "message": "Login successful" if session else "Login response received",
             }
         else:
@@ -445,14 +503,14 @@ async def auth(data: AuthData):
 
 # Fallback root handler to support platform rewrites that drop subpaths
 @app.post("/")
-async def auth_root(data: AuthData):
+async def auth_root(data: AuthData, response: Response):
     """Accept POSTs at the root and forward to `/auth` semantics."""
-    return await auth(data)
+    return await auth(data, response)
 
 
 # Catch-all POST to support rewrites preserving subpaths
 @app.post("/{_path:path}")
-async def auth_any_path(_path: str, data: AuthData):
+async def auth_any_path(_path: str, data: AuthData, response: Response):
     """Accept POSTs at any subpath and forward to `auth`.
     Doesn NOT work without this on Vercel !!!
 
@@ -461,7 +519,7 @@ async def auth_any_path(_path: str, data: AuthData):
     to alternate paths (like `/api/login` or `/api/signup`) and still hit
     the same handler.
     """
-    return await auth(data)
+    return await auth(data, response)
 
 
 # Also provide GET catch-all to confirm routing without requiring body
@@ -469,3 +527,69 @@ async def auth_any_path(_path: str, data: AuthData):
 async def get_any_path(_path: str):
     """Simple GET responder for any path; helpful for routing checks."""
     return {"route": _path or "/", "message": "FastAPI index3 alive"}
+
+
+@app.post("/profile")
+async def get_profile(req: ProfileReq, request: Request):
+    """Return encrypted profile info for the current session.
+
+    Auth via session cookie `sb_access_token` set during login.
+    The client supplies a base64 AES key `rtk` used only to encrypt the response.
+    """
+    try:
+        token = request.cookies.get("sb_access_token")
+        if not token:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+        public_client, service_key, supabase_url = _build_supabase_public()
+        # Validate token and get user
+        user_res = public_client.auth.get_user(token)
+        user = getattr(user_res, "user", None)
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid session")
+
+        uid = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None)
+        uemail = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None)
+
+        # Enrich profile using service role SDK when available
+        profile = _fetch_profile_admin_sdk(supabase_url, service_key, user_id=uid, email=uemail)
+
+        # Build PII object
+        meta_dict = {}
+        try:
+            if isinstance(user, dict):
+                meta_dict = (user.get("user_metadata") or {})
+            else:
+                um = getattr(user, "user_metadata", None)
+                if isinstance(um, dict):
+                    meta_dict = um
+        except Exception:
+            meta_dict = {}
+
+        fn = (profile or {}).get("first_name") or (meta_dict or {}).get("first_name") or None
+        ln = (profile or {}).get("last_name") or (meta_dict or {}).get("last_name") or None
+        full_name = None
+        if (profile or {}).get("full_name"):
+            full_name = (profile or {}).get("full_name")
+        elif (meta_dict or {}).get("name"):
+            full_name = (meta_dict or {}).get("name")
+        else:
+            full_name = (f"{(fn or '').strip()} {(ln or '').strip()}").strip()
+
+        pii = {
+            "first_name": fn,
+            "last_name": ln,
+            "name": full_name,
+            "email": uemail,
+        }
+
+        enc_blob = _aesgcm_encrypt_profile(req.rtk, pii)
+        if not enc_blob:
+            raise HTTPException(status_code=400, detail="Encryption unavailable")
+
+        return {"enc_profile": enc_blob["enc_profile"], "iv": enc_blob["iv"], "alg": enc_blob.get("alg", "AES-GCM")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.info(f"/profile error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch profile")
