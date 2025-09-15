@@ -1,28 +1,20 @@
 from fastapi import FastAPI, HTTPException, Request, Response
-from pydantic import BaseModel
-from typing import Optional, Tuple, Dict, Any
-import os
 import logging
-import json as _json
-from urllib import request as _urlreq
-from urllib import parse as _urlparse
-import base64 as _b64
+from typing import Dict, Any, Optional
 
-try:
-    # RSA decryption for client-side encrypted payloads
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.backends import default_backend
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-except Exception:
-    serialization = None
-
-try:
-    # Supabase Python client (v2)
-    from supabase import create_client
-except Exception:
-    create_client = None  # Will raise at runtime if not installed
+from .models import AuthData, ProfileReq
+from .utils.crypto_utils import (
+    decrypt_auth_payload,
+    aesgcm_encrypt_profile,
+    mask_email_for_log,
+)
+from .utils.supabase_utils import (
+    build_supabase_public,
+    admin_get_user_by_email_rest,
+    fetch_profile_admin_sdk,
+)
+from .middleware import log_requests
+from .utils.common import normalize_email
 
 
 logging.basicConfig(level=logging.INFO)
@@ -32,21 +24,8 @@ app = FastAPI()
 
 
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Simple request logging middleware.
-
-    - Logs the incoming method + path for every request.
-    - Calls the downstream handler and logs the final status code.
-    - Captures and logs unhandled exceptions before re-raising.
-    """
-    logger.info(f"{request.method} {request.url.path}")
-    try:
-        response = await call_next(request)
-        logger.info(f"-> {response.status_code} {request.method} {request.url.path}")
-        return response
-    except Exception as e:
-        logger.exception(f"Unhandled error for {request.method} {request.url.path}: {e}")
-        raise
+async def _log_requests(request: Request, call_next):
+    return await log_requests(request, call_next)
 
 
 @app.get("/")
@@ -59,263 +38,9 @@ async def root():
 
 
 
-class FormData(BaseModel):
-    name: str
-    email: str
+"""Keep only route handlers and lightweight glue in this file."""
 
 
-class AuthData(BaseModel):
-    mode: str  # 'login' or 'signup'
-    # Plain fields (backwards compatibility); avoided when `enc` provided
-    email: Optional[str] = None
-    password: Optional[str] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    # Encrypted compact payload (base64-encoded RSA-OAEP)
-    enc: Optional[str] = None
-
-
-class ProfileReq(BaseModel):
-    rtk: str  # base64 AES key from client
-
-
-def _normalize_email(email: str) -> str:
-    try:
-        return (email or "").strip().lower()
-    except Exception:
-        return email
-
-
-def _build_supabase_public() -> Tuple[object, str, str]:
-    """Create a public Supabase client and return (client, service_key, supabase_url).
-    service_key is returned to enable admin REST calls when available; may be empty string.
-    """
-    if create_client is None:
-        raise HTTPException(status_code=500, detail="Supabase client not installed on server.")
-
-    supabase_url = os.getenv("SUPABASE_URL") or ""
-    anon_key = os.getenv("SUPABASE_ANON_KEY") or ""
-    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
-
-    if not supabase_url or not (anon_key or service_key):
-        raise HTTPException(status_code=500, detail="Supabase environment not configured.")
-
-    try:
-        public_client = create_client(supabase_url, anon_key or service_key)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to initialize Supabase client: {e}")
-
-    return public_client, service_key, supabase_url
-
-
-def _load_private_key() -> Optional[object]:
-    """Load RSA private key from env var `AUTH_PRIVATE_KEY_PEM` or `api/keys/private_key.pem`.
-
-    Returns a cryptography private key object, or None if unavailable.
-    """
-    if serialization is None:
-        return None
-    pem = os.getenv("AUTH_PRIVATE_KEY_PEM")
-    if pem:
-        try:
-            # Support envs that store PEM with escaped newlines
-            if "\\n" in pem and "\n" not in pem:
-                pem = pem.replace("\\n", "\n")
-            key = serialization.load_pem_private_key(
-                pem.encode("utf-8"), password=None, backend=default_backend()
-            )
-            return key
-        except Exception:
-            pass
-    # Try file fallback
-    file_path = os.path.join(os.path.dirname(__file__), "keys", "private_key.pem")
-    try:
-        if os.path.exists(file_path):
-            with open(file_path, "rb") as f:
-                key = serialization.load_pem_private_key(
-                    f.read(), password=None, backend=default_backend()
-                )
-                return key
-    except Exception:
-        pass
-    return None
-
-
-def _decrypt_auth_payload(enc_b64: str) -> Optional[Dict[str, Any]]:
-    """Decrypt base64-encoded RSA-OAEP (SHA-256) payload containing JSON.
-
-    Expected JSON shape: { email, password, first_name?, last_name? }
-    Returns dict or None if decryption fails or key missing.
-    """
-    try:
-        if not enc_b64:
-            return None
-        priv = _load_private_key()
-        if priv is None:
-            logger.warning("AUTH_PRIVATE_KEY not available; cannot decrypt 'enc' payload")
-            return None
-        ciphertext = _b64.b64decode(enc_b64)
-        plaintext = priv.decrypt(
-            ciphertext,
-            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
-        )
-        data = _json.loads(plaintext.decode("utf-8"))
-        if not isinstance(data, dict):
-            return None
-        return data
-    except Exception as e:
-        logger.info(f"Decryption failed: {e}")
-        return None
-
-
-def _mask_email_for_log(email: str) -> str:
-    try:
-        if not email:
-            return ""
-        parts = email.split("@", 1)
-        user = parts[0]
-        domain = parts[1] if len(parts) > 1 else ""
-        first = (user[:1] or "*")
-        last = (user[-1:] or "*")
-        return f"{first}***{last}@{domain}" if domain else f"{first}***{last}"
-    except Exception:
-        return "***"
-
-
-def _aesgcm_encrypt_profile(return_key_b64: Optional[str], profile: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    """Encrypt profile dict with AES-GCM using a base64 return key from client.
-
-    Returns dict with 'enc_profile' (base64) and 'iv' (base64) or None.
-    """
-    try:
-        if not return_key_b64 or AESGCM is None:
-            return None
-        key = _b64.b64decode(return_key_b64)
-        if len(key) not in (16, 24, 32):
-            return None
-        aesgcm = AESGCM(key)
-        iv = os.urandom(12)
-        plaintext = _json.dumps(profile).encode("utf-8")
-        ct = aesgcm.encrypt(iv, plaintext, associated_data=None)
-        return {"enc_profile": _b64.b64encode(ct).decode("utf-8"), "iv": _b64.b64encode(iv).decode("utf-8"), "alg": "AES-GCM"}
-    except Exception as e:
-        logger.info(f"AES-GCM encrypt failed: {e}")
-        return None
-
-
-def _admin_get_user_by_email_rest(supabase_url: str, service_key: str, email: str) -> bool:
-    """Check auth.users for a matching email via GoTrue Admin REST.
-
-    - If a direct `?email=` filter is supported by the deployment, use it.
-    - Otherwise, fetch the first page of users and filter by email locally.
-    - Returns True if a case-insensitive match is found; False otherwise.
-    """
-    if not service_key:
-        return False
-
-    base = supabase_url.rstrip("/") + "/auth/v1/admin/users"
-    headers = {
-        "apikey": service_key,
-        "Authorization": f"Bearer {service_key}",
-    }
-    email_q = _urlparse.urlencode({"email": email})
-    url = f"{base}?{email_q}"
-
-    def _fetch_json(u: str):
-        req = _urlreq.Request(u, headers=headers, method="GET")
-        with _urlreq.urlopen(req, timeout=10) as resp:
-            body = resp.read()
-            ct = resp.headers.get("content-type", "")
-            if "application/json" not in ct and not body.strip().startswith(b"{") and not body.strip().startswith(b"["):
-                raise ValueError("Non-JSON admin response")
-            return _json.loads(body.decode("utf-8"))
-
-    try:
-        data = _fetch_json(url)
-        # Possible shapes: list of users, or object with 'users'/'data'
-        if isinstance(data, list):
-            return any(((u.get("email") or "").lower() == email.lower()) for u in data)
-        if isinstance(data, dict):
-            arr = data.get("users") or data.get("data") or []
-            if isinstance(arr, list):
-                return any(((getattr(u, "email", None) or u.get("email") or "").lower() == email.lower()) for u in arr)
-            # If a single user object is returned
-            if data.get("email"):
-                return (data.get("email") or "").lower() == email.lower()
-    except Exception as e:
-        logger.info(f"Admin email filter unsupported or failed: {e}")
-
-    # Fallback: list first page and filter client-side
-    try:
-        list_url = f"{base}?page=1&per_page=200"
-        data = _fetch_json(list_url)
-        items = []
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            items = data.get("users") or data.get("data") or []
-        return any(((getattr(u, "email", None) or (u.get("email") if isinstance(u, dict) else None) or "").lower() == email.lower()) for u in items)
-    except Exception as e:
-        logger.info(f"Admin list users failed: {e}")
-        return False
-
-
-def _fetch_profile_admin_sdk(supabase_url: str, service_key: str, user_id: Optional[str] = None, email: Optional[str] = None) -> Optional[dict]:
-    """Fetch a single profile using the Supabase Python client with service role key.
-
-    This avoids URL quirks with PostgREST and leverages the SDK.
-    """
-    if not service_key or create_client is None:
-        return None
-    try:
-        admin_client = create_client(supabase_url, service_key)
-        # Try first_name/last_name first; fallback to full_name; final fallback to name
-        selectors = [
-            "id,first_name,last_name,full_name",
-            "id,full_name",
-            "id,name",
-        ]
-        for sel in selectors:
-            try:
-                q = admin_client.table("profiles").select(sel).limit(1)
-                if user_id:
-                    q = q.eq("id", user_id)
-                elif email:
-                    q = q.eq("email", email)
-                else:
-                    return None
-                res = q.execute()
-                data = getattr(res, "data", None)
-                if isinstance(data, list) and data:
-                    item = data[0]
-                    return {
-                        "id": item.get("id"),
-                        "first_name": item.get("first_name"),
-                        "last_name": item.get("last_name"),
-                        "full_name": item.get("full_name") or item.get("name"),
-                    }
-            except Exception as _e:
-                # try next selector
-                continue
-    except Exception as e:
-        logger.info(f"Profile fetch (SDK) failed: {e}")
-    return None
-
-
-def _check_email_exists_rest(public_client, supabase_url: str, service_key: str, email: str) -> dict:
-    """Deprecated: Previously checked both auth.users and profiles by email.
-
-    Kept for backward compatibility but now only checks `auth.users` via
-    admin REST (when `service_key` is available). Prefer calling
-    `_admin_get_user_by_email_rest` directly where possible.
-    """
-    result = {"in_users": False, "in_profiles": False}
-    try:
-        if service_key:
-            result["in_users"] = _admin_get_user_by_email_rest(supabase_url, service_key, email)
-    except Exception as e:
-        logger.info(f"Admin REST check unavailable: {e}")
-    return result
 
 
 @app.post("/auth")
@@ -327,23 +52,26 @@ async def auth(data: AuthData, response: Response):
     """
     mode = (data.mode or "").lower().strip()
     # Prefer encrypted payload when available
-    decrypted = _decrypt_auth_payload(data.enc) if getattr(data, "enc", None) else None
+    decrypted = decrypt_auth_payload(data.enc) if getattr(data, "enc", None) else None
     if getattr(data, "enc", None) and decrypted is None:
         raise HTTPException(status_code=400, detail="Invalid encrypted payload")
-    email = _normalize_email((decrypted or {}).get("email") or (data.email or ""))
+    email = normalize_email((decrypted or {}).get("email") or (data.email or ""))
     password = (decrypted or {}).get("password") or data.password or ""
     first_name = (decrypted or {}).get("first_name") or data.first_name
     last_name = (decrypted or {}).get("last_name") or data.last_name
     return_key_b64 = (decrypted or {}).get("rtk") or None
     try:
-        logger.info(f"Auth request: mode={mode}, email={_mask_email_for_log(email)}")
+        logger.info(f"Auth request: mode={mode}, email={mask_email_for_log(email)}")
     except Exception:
         pass
 
     if mode not in {"login", "signup"}:
         raise HTTPException(status_code=400, detail="Invalid mode. Use 'login' or 'signup'.")
 
-    public_client, service_key, supabase_url = _build_supabase_public()
+    try:
+        public_client, service_key, supabase_url = build_supabase_public()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     try:
         if mode == "login":
@@ -359,7 +87,7 @@ async def auth(data: AuthData, response: Response):
                 uid = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None)
                 uemail = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None)
                 # Prefer SDK with service role
-                profile = _fetch_profile_admin_sdk(supabase_url, service_key, user_id=uid, email=uemail)
+                profile = fetch_profile_admin_sdk(supabase_url, service_key, user_id=uid, email=uemail)
                 
             except Exception as e:
                 logger.info(f"Profile enrichment skipped: {e}")
@@ -404,7 +132,7 @@ async def auth(data: AuthData, response: Response):
                 # Avoid returning email in plaintext
                 "email": getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None),
             }
-            enc_blob = _aesgcm_encrypt_profile(return_key_b64, pii)
+            enc_blob = aesgcm_encrypt_profile(return_key_b64, pii)
             # Set a session cookie with Supabase access token (session cookie, HttpOnly)
             try:
                 if session and getattr(session, "access_token", None):
@@ -434,7 +162,7 @@ async def auth(data: AuthData, response: Response):
             }
         else:
             # Pre-check only against auth.users using Admin REST when available
-            if service_key and _admin_get_user_by_email_rest(supabase_url, service_key, email):
+            if service_key and admin_get_user_by_email_rest(supabase_url, service_key, email):
                 raise HTTPException(
                     status_code=409,
                     detail="Email already registered. Please log in instead.",
@@ -461,7 +189,8 @@ async def auth(data: AuthData, response: Response):
             # Create or update profiles row via admin client if available
             try:
                 if service_key and user:
-                    admin_client = create_client(supabase_url, service_key)
+                    from supabase import create_client as _create_client
+                    admin_client = _create_client(supabase_url, service_key)
                     uid = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else None)
                     profile_payload = {
                         "id": uid,
@@ -541,7 +270,10 @@ async def get_profile(req: ProfileReq, request: Request):
         if not token:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
-        public_client, service_key, supabase_url = _build_supabase_public()
+        try:
+            public_client, service_key, supabase_url = build_supabase_public()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
         # Validate token and get user
         user_res = public_client.auth.get_user(token)
         user = getattr(user_res, "user", None)
@@ -552,7 +284,7 @@ async def get_profile(req: ProfileReq, request: Request):
         uemail = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None)
 
         # Enrich profile using service role SDK when available
-        profile = _fetch_profile_admin_sdk(supabase_url, service_key, user_id=uid, email=uemail)
+        profile = fetch_profile_admin_sdk(supabase_url, service_key, user_id=uid, email=uemail)
 
         # Build PII object
         meta_dict = {}
@@ -583,7 +315,7 @@ async def get_profile(req: ProfileReq, request: Request):
             "email": uemail,
         }
 
-        enc_blob = _aesgcm_encrypt_profile(req.rtk, pii)
+        enc_blob = aesgcm_encrypt_profile(req.rtk, pii)
         if not enc_blob:
             raise HTTPException(status_code=400, detail="Encryption unavailable")
 
