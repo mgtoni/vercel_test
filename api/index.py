@@ -53,13 +53,6 @@ class FormData(BaseModel):
     email: str
 
 
-@app.post("/submit")
-async def submit_form(data: FormData):
-    """Example form endpoint used by the frontend demo."""
-    logger.info(f"Received data: {data}")
-    return {"message": "Data received successfully"}
-
-
 class AuthData(BaseModel):
     mode: str  # 'login' or 'signup'
     email: str
@@ -77,7 +70,6 @@ def _normalize_email(email: str) -> str:
 
 def _build_supabase_public() -> Tuple[object, str, str]:
     """Create a public Supabase client and return (client, service_key, supabase_url).
-
     service_key is returned to enable admin REST calls when available; may be empty string.
     """
     if create_client is None:
@@ -198,40 +190,19 @@ def _fetch_profile_admin_sdk(supabase_url: str, service_key: str, user_id: Optio
 
 
 def _check_email_exists_rest(public_client, supabase_url: str, service_key: str, email: str) -> dict:
-    """Check if an email already exists in either auth.users or profiles.
+    """Deprecated: Previously checked both auth.users and profiles by email.
 
-    - Uses Admin REST (if `service_key` is available) to search `auth.users`.
-    - Queries the `profiles` table via the public client using `ilike` if supported.
-    - Returns a dict: {"in_users": bool, "in_profiles": bool}.
+    Kept for backward compatibility but now only checks `auth.users` via
+    admin REST (when `service_key` is available). Prefer calling
+    `_admin_get_user_by_email_rest` directly where possible.
     """
-    exists = {"in_users": False, "in_profiles": False}
-
-    # Admin REST check (only if service key available)
+    result = {"in_users": False, "in_profiles": False}
     try:
         if service_key:
-            exists["in_users"] = _admin_get_user_by_email_rest(supabase_url, service_key, email)
+            result["in_users"] = _admin_get_user_by_email_rest(supabase_url, service_key, email)
     except Exception as e:
         logger.info(f"Admin REST check unavailable: {e}")
-
-    # profiles table check (prefer case-insensitive if supported)
-    try:
-        try:
-            q = public_client.table("profiles").select("id").limit(1)
-            # try ilike if available
-            if hasattr(q, "ilike"):
-                q = q.ilike("email", email)
-            else:
-                q = q.eq("email", email)
-            res = q.execute()
-            data = getattr(res, "data", None)
-            if isinstance(data, list) and len(data) > 0:
-                exists["in_profiles"] = True
-        except Exception as e:
-            logger.info(f"Profiles check failed: {e}")
-    except Exception as e:
-        logger.info(f"Profiles check unavailable: {e}")
-
-    return exists
+    return result
 
 
 @app.post("/auth")
@@ -310,9 +281,8 @@ async def auth(data: AuthData):
                 "message": "Login successful" if session else "Login response received",
             }
         else:
-            # Pre-check for existing email in auth.users and profiles
-            exists = _check_email_exists_rest(public_client, supabase_url, service_key, email)
-            if exists.get("in_users") or exists.get("in_profiles"):
+            # Pre-check only against auth.users using Admin REST when available
+            if service_key and _admin_get_user_by_email_rest(supabase_url, service_key, email):
                 raise HTTPException(
                     status_code=409,
                     detail="Email already registered. Please log in instead.",
