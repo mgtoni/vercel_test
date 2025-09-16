@@ -186,6 +186,12 @@ async def auth_root(data: AuthData, response: Response):
 
 @router.post("/{_path:path}")
 async def auth_any_path(_path: str, data: AuthData, response: Response):
+    # Avoid intercepting admin endpoints
+    try:
+        if (_path or "").strip().lower().startswith("admin"):
+            raise HTTPException(status_code=404, detail="Not found")
+    except Exception:
+        pass
     return await auth(data, response)
 
 
@@ -251,4 +257,3 @@ async def list_pdfs(group: str, score: Optional[int] = None, limit: int = 10):
     except Exception as e:
         logger.info(f"/pdfs manifest error: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch PDFs from manifest")
-

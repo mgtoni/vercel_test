@@ -16,6 +16,6 @@ async def _log_requests(request: Request, call_next):
     return await log_requests(request, call_next)
 
 
-# Mount user and admin routers
-app.include_router(user_router)
+# Mount admin first to avoid catch-all collisions
 app.include_router(admin_router)
+app.include_router(user_router)
