@@ -23,7 +23,7 @@ alter table public.pdf_assets enable row level security;
 -- Policy allowing service role full access; restrict anon if needed.
 do $$ begin
   if not exists (
-    select 1 from pg_policies where polname = 'service_role_all_pdf_assets'
+    select 1 from pg_policies where policyname = 'service_role_all_pdf_assets'
   ) then
     create policy service_role_all_pdf_assets on public.pdf_assets
       for all

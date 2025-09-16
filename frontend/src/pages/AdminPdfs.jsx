@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 function Field({ label, children }) {
   return (
@@ -31,6 +32,7 @@ function RowEditor({ value, onChange, onSave, onCancel }) {
 }
 
 export default function AdminPdfs() {
+  const navigate = useNavigate();
   const [items, setItems] = useState([]);
   const [group, setGroup] = useState("profile");
   const [loading, setLoading] = useState(false);
@@ -60,6 +62,19 @@ export default function AdminPdfs() {
   };
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [group]);
+
+  // Admin gate: verify admin session on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/admin/me', { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('not admin');
+      } catch (e) {
+        navigate('/');
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const create = async () => {
     try {
@@ -195,4 +210,3 @@ export default function AdminPdfs() {
     </div>
   );
 }
-
