@@ -1,10 +1,10 @@
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Request, Form
 
 from ..models import PdfAssetCreate, PdfAssetUpdate
 from ..utils.admin_checks import require_admin
-from ..utils.core_supabase import build_supabase_public
+from ..utils.core_supabase import build_supabase_public, create_signed_upload_url
 
 router = APIRouter(prefix="/admin")
 logger = logging.getLogger("api3.routes.admin")
@@ -92,86 +92,34 @@ async def admin_delete_pdf(item_id: str, request: Request):
         raise HTTPException(status_code=500, detail="Failed to delete pdf_asset")
 
 
-@router.post("/upload")
-async def admin_upload_pdf(
+
+
+@router.post("/upload-url")
+async def admin_create_upload_url(
     request: Request,
     bucket: str = Form(...),
     dest_path: str = Form(""),
-    upsert: bool = Form(True),
-    group_key: str | None = Form(None),
-    label: str | None = Form(None),
-    order_index: int | None = Form(None),
-    is_default: bool | None = Form(None),
-    score_min: int | None = Form(None),
-    score_max: int | None = Form(None),
-    active: bool | None = Form(True),
-    file: UploadFile = File(...),
+    filename: str = Form(...),
 ):
-    """Upload a PDF to a Supabase Storage bucket and optionally insert a manifest row.
+    """Return a signed upload URL and token for direct browser upload.
 
-    - bucket: storage bucket name
-    - dest_path: destination path or prefix in bucket; if ends with '/', the filename is appended
-    - upsert: whether to overwrite existing object
-    - group_key, label, order_index, is_default, score_min, score_max, active: if provided, creates a row in pdf_assets
+    Client should perform a PUT to the returned signed_url with the file body.
     """
     _ = require_admin(request)
     try:
-        from supabase import create_client as _create_client
         _public, service_key, supabase_url = build_supabase_public()
-        admin = _create_client(supabase_url, service_key)
-
-        # Normalize destination path
-        orig_name = file.filename or "upload.pdf"
-        safe_name = orig_name.split("/")[-1]
+        safe_name = filename.split("/")[-1]
         dp = (dest_path or "").strip()
         if dp.endswith("/") or dp == "":
             final_path = (dp + safe_name).lstrip("/")
         else:
             final_path = dp.lstrip("/")
-
-        content = await file.read()
-        if not content:
-            raise HTTPException(status_code=400, detail="Empty file")
-
-        options = {"content-type": file.content_type or "application/pdf", "upsert": bool(upsert)}
-        # Upload to storage
-        admin.storage.from_(bucket).upload(final_path, content, options)
-
-        # Optional manifest insert
-        inserted = None
-        if group_key:
-            payload = {
-                "group_key": group_key,
-                "bucket": bucket,
-                "path": final_path,
-                "label": label or safe_name,
-                "order_index": order_index if order_index is not None else 0,
-                "is_default": bool(is_default) if is_default is not None else False,
-                "score_min": score_min,
-                "score_max": score_max,
-                "active": True if active is None else bool(active),
-            }
-            res = admin.table("pdf_assets").insert(payload).execute()
-            data = getattr(res, "data", None) or []
-            inserted = data[0] if data else None
-
-        # Signed URL for immediate preview
-        try:
-            from ..utils.core_supabase import create_signed_storage_url
-            signed_url = create_signed_storage_url(supabase_url, service_key, bucket, final_path, 1800)
-        except Exception:
-            signed_url = None
-
-        return {
-            "bucket": bucket,
-            "path": final_path,
-            "content_type": options["content-type"],
-            "upsert": bool(upsert),
-            "manifest": inserted,
-            "signed_url": signed_url,
-        }
+        info = create_signed_upload_url(supabase_url, service_key, bucket, final_path)
+        if not info:
+            raise HTTPException(status_code=500, detail="Failed to create signed upload URL")
+        return {"bucket": bucket, "path": final_path, **info}
     except HTTPException:
         raise
     except Exception as e:
-        logger.info(f"admin_upload_pdf error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to upload PDF")
+        logger.info(f"admin_create_upload_url error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create signed upload URL")

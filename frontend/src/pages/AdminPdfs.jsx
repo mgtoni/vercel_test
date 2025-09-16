@@ -178,20 +178,43 @@ export default function AdminPdfs() {
               if (!upload.bucket || !upload.file) { alert('Bucket and file are required'); return; }
               setUploading(true);
               try {
-                const fd = new FormData();
-                fd.append('bucket', upload.bucket);
-                fd.append('dest_path', upload.dest_path || '');
-                fd.append('upsert', 'true');
-                fd.append('group_key', group);
-                if (upload.label) fd.append('label', upload.label);
-                fd.append('order_index', String(upload.order_index ?? 0));
-                fd.append('is_default', String(!!upload.is_default));
-                if (upload.score_min !== '') fd.append('score_min', String(upload.score_min));
-                if (upload.score_max !== '') fd.append('score_max', String(upload.score_max));
-                fd.append('active', String(upload.active !== false));
-                fd.append('file', upload.file);
-                const res = await fetch('/api/admin/upload', { method: 'POST', body: fd, credentials: 'same-origin' });
-                if (!res.ok) throw new Error(await res.text());
+                // Step 1: Get signed upload URL
+                const prep = new FormData();
+                prep.append('bucket', upload.bucket);
+                prep.append('dest_path', upload.dest_path || '');
+                prep.append('filename', upload.file.name);
+                const up = await fetch('/api/admin/upload-url', { method: 'POST', body: prep, credentials: 'same-origin' });
+                if (!up.ok) throw new Error(await up.text());
+                const upData = await up.json();
+
+                // Step 2: PUT file to signed URL (direct to Supabase Storage)
+                const putRes = await fetch(upData.signed_url, {
+                  method: 'PUT',
+                  headers: { 'Content-Type': upload.file.type || 'application/pdf' },
+                  body: upload.file,
+                });
+                if (!putRes.ok) throw new Error(`Upload to storage failed: ${putRes.status}`);
+
+                // Step 3: Create manifest row
+                const manifest = {
+                  group_key: group,
+                  bucket: upload.bucket,
+                  path: upData.path,
+                  label: upload.label || upload.file.name,
+                  order_index: upload.order_index ?? 0,
+                  is_default: !!upload.is_default,
+                  score_min: upload.score_min === '' ? null : Number(upload.score_min),
+                  score_max: upload.score_max === '' ? null : Number(upload.score_max),
+                  active: upload.active !== false,
+                };
+                const manRes = await fetch('/api/admin/pdfs', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  credentials: 'same-origin',
+                  body: JSON.stringify(manifest),
+                });
+                if (!manRes.ok) throw new Error(await manRes.text());
+
                 await load();
                 alert('Uploaded successfully');
               } catch (e) {

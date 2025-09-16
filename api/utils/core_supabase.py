@@ -131,6 +131,26 @@ def create_signed_storage_url(supabase_url: str, service_key: str, bucket: str, 
     """Create a time-limited signed URL for a storage object."""
     if not service_key or create_client is None:
         return None
+
+
+def create_signed_upload_url(supabase_url: str, service_key: str, bucket: str, path: str) -> Optional[Dict[str, str]]:
+    """Create a signed upload URL for direct-from-browser upload to Storage.
+
+    Returns dict { 'signed_url': str, 'token': str } or None on failure.
+    """
+    if not service_key or create_client is None:
+        return None
+    try:
+        admin_client = create_client(supabase_url, service_key)
+        res = admin_client.storage.from_(bucket).create_signed_upload_url(path)
+        # SDK may return dict or object
+        signed_url = getattr(res, "signed_url", None) or (res.get("signed_url") if isinstance(res, dict) else None)
+        token = getattr(res, "token", None) or (res.get("token") if isinstance(res, dict) else None)
+        if signed_url and token:
+            return {"signed_url": signed_url, "token": token}
+    except Exception as e:
+        logger.info(f"Signed upload URL generation failed for {bucket}/{path}: {e}")
+    return None
     try:
         admin_client = create_client(supabase_url, service_key)
         res = admin_client.storage.from_(bucket).create_signed_url(path, expires_in)
@@ -139,4 +159,3 @@ def create_signed_storage_url(supabase_url: str, service_key: str, bucket: str, 
     except Exception as e:
         logger.info(f"Signed URL generation failed for {bucket}/{path}: {e}")
         return None
-
