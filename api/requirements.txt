@@ -2,3 +2,4 @@ fastapi
 supabase>=2.4.0
 email-validator
 cryptography>=42.0.0
+python-multipart>=0.0.6
