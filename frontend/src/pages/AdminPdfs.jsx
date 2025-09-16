@@ -41,6 +41,8 @@ export default function AdminPdfs() {
   const [newItem, setNewItem] = useState({ group_key: "profile", bucket: "", path: "", label: "", order_index: 0, is_default: false, score_min: null, score_max: null, active: true });
   const [editingId, setEditingId] = useState(null);
   const [editItem, setEditItem] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [upload, setUpload] = useState({ bucket: "", dest_path: "", label: "", order_index: 0, is_default: false, score_min: "", score_max: "", active: true, file: null });
 
   const adminPath = useMemo(() => `/api/admin/pdfs`, []);
 
@@ -154,6 +156,52 @@ export default function AdminPdfs() {
             </div>
           </div>
         )}
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <h3>Upload PDF to Storage + Create Manifest</h3>
+        <div style={{ border: "1px solid #ddd", padding: 12, marginTop: 12 }}>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <Field label="Bucket"><input value={upload.bucket} onChange={(e)=>setUpload({ ...upload, bucket: e.target.value })} placeholder="private bucket name" /></Field>
+            <Field label="Dest Path / Prefix"><input value={upload.dest_path} onChange={(e)=>setUpload({ ...upload, dest_path: e.target.value })} placeholder="e.g., profile/default/ or profile/score-5/" /></Field>
+            <Field label="Group"><input value={group} onChange={(e)=>setGroup(e.target.value)} /></Field>
+            <Field label="Label"><input value={upload.label} onChange={(e)=>setUpload({ ...upload, label: e.target.value })} /></Field>
+            <Field label="Order"><input type="number" value={upload.order_index ?? 0} onChange={(e)=>setUpload({ ...upload, order_index: Number(e.target.value) })} /></Field>
+            <Field label="Default"><input type="checkbox" checked={!!upload.is_default} onChange={(e)=>setUpload({ ...upload, is_default: e.target.checked })} /></Field>
+            <Field label="Score Min"><input type="number" value={upload.score_min} onChange={(e)=>setUpload({ ...upload, score_min: e.target.value })} /></Field>
+            <Field label="Score Max"><input type="number" value={upload.score_max} onChange={(e)=>setUpload({ ...upload, score_max: e.target.value })} /></Field>
+            <Field label="Active"><input type="checkbox" checked={upload.active !== false} onChange={(e)=>setUpload({ ...upload, active: e.target.checked })} /></Field>
+            <Field label="File"><input type="file" accept="application/pdf" onChange={(e)=>setUpload({ ...upload, file: e.target.files?.[0] || null })} /></Field>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <button disabled={uploading} onClick={async ()=>{
+              if (!upload.bucket || !upload.file) { alert('Bucket and file are required'); return; }
+              setUploading(true);
+              try {
+                const fd = new FormData();
+                fd.append('bucket', upload.bucket);
+                fd.append('dest_path', upload.dest_path || '');
+                fd.append('upsert', 'true');
+                fd.append('group_key', group);
+                if (upload.label) fd.append('label', upload.label);
+                fd.append('order_index', String(upload.order_index ?? 0));
+                fd.append('is_default', String(!!upload.is_default));
+                if (upload.score_min !== '') fd.append('score_min', String(upload.score_min));
+                if (upload.score_max !== '') fd.append('score_max', String(upload.score_max));
+                fd.append('active', String(upload.active !== false));
+                fd.append('file', upload.file);
+                const res = await fetch('/api/admin/upload', { method: 'POST', body: fd, credentials: 'same-origin' });
+                if (!res.ok) throw new Error(await res.text());
+                await load();
+                alert('Uploaded successfully');
+              } catch (e) {
+                alert(`Upload failed: ${e.message || e}`);
+              } finally {
+                setUploading(false);
+              }
+            }}>Upload</button>
+          </div>
+        </div>
       </div>
 
       <div style={{ overflowX: "auto" }}>
