@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 import logging
 from typing import Dict, Any, Optional
 
-from .models import AuthData, ProfileReq
+from .models import AuthData, ProfileReq, PdfAssetCreate, PdfAssetUpdate
 from .utils.crypto_utils import (
     decrypt_auth_payload,
     aesgcm_encrypt_profile,
@@ -12,6 +12,7 @@ from .utils.supabase_utils import (
     build_supabase_public,
     admin_get_user_by_email_rest,
     fetch_profile_admin_sdk,
+    fetch_pdfs_from_manifest,
 )
 from .middleware import log_requests
 from .utils.common import normalize_email
@@ -325,3 +326,132 @@ async def get_profile(req: ProfileReq, request: Request):
     except Exception as e:
         logger.info(f"/profile error: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch profile")
+
+
+@app.get("/pdfs")
+async def list_pdfs(group: str, score: Optional[int] = None, limit: int = 10):
+    """List PDFs from DB-backed manifest for a group and optional score.
+
+    Query params:
+    - group (required): logical grouping key, e.g. 'profile'
+    - score (optional): integer score to match score_min/max ranges
+    - limit (optional): max items to return (default 10)
+    """
+    try:
+        limit = max(1, min(int(limit or 10), 100))
+    except Exception:
+        limit = 10
+
+    try:
+        items = fetch_pdfs_from_manifest(group=group, score=score, limit=limit)
+        return {"items": items}
+    except Exception as e:
+        logger.info(f"/pdfs manifest error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch PDFs from manifest")
+
+
+# --- Admin helpers and endpoints for managing pdf_assets ---
+def _require_admin_email(request: Request) -> str:
+    """Validate user via Supabase session cookie and ensure email is in ADMIN_EMAILS.
+
+    Returns the admin email on success; raises HTTPException otherwise.
+    """
+    import os
+    allowed_raw = os.getenv("ADMIN_EMAILS") or ""
+    allowed = {e.strip().lower() for e in allowed_raw.split(",") if e.strip()}
+    if not allowed:
+        # If not configured, deny access by default
+        raise HTTPException(status_code=403, detail="Admin access not configured")
+
+    try:
+        token = request.cookies.get("sb_access_token")
+        if not token:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        public_client, _service_key, _url = build_supabase_public()
+        user_res = public_client.auth.get_user(token)
+        user = getattr(user_res, "user", None)
+        email = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None)
+        if not email or email.lower() not in allowed:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        return email
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.info(f"Admin check failed: {e}")
+        raise HTTPException(status_code=401, detail="Admin verification failed")
+
+
+@app.get("/admin/pdfs")
+async def admin_list_pdfs(request: Request, group: Optional[str] = None, limit: int = 50, offset: int = 0):
+    _ = _require_admin_email(request)
+    try:
+        from supabase import create_client as _create_client
+        public_client, service_key, supabase_url = build_supabase_public()
+        admin = _create_client(supabase_url, service_key)
+        q = (
+            admin.table("pdf_assets")
+            .select("id,group_key,bucket,path,label,order_index,is_default,score_min,score_max,active,created_at,updated_at")
+            .order("group_key", desc=False)
+            .order("order_index", desc=False)
+        )
+        if group:
+            q = q.eq("group_key", group)
+        if offset:
+            q = q.range(offset, offset + max(0, int(limit)) - 1)
+        else:
+            q = q.limit(max(1, min(int(limit or 50), 200)))
+        res = q.execute()
+        items = getattr(res, "data", None) or []
+        return {"items": items}
+    except Exception as e:
+        logger.info(f"admin_list_pdfs error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list pdf_assets")
+
+
+@app.post("/admin/pdfs")
+async def admin_create_pdf(request: Request, body: PdfAssetCreate):
+    _ = _require_admin_email(request)
+    try:
+        from supabase import create_client as _create_client
+        public_client, service_key, supabase_url = build_supabase_public()
+        admin = _create_client(supabase_url, service_key)
+        payload = body.dict()
+        res = admin.table("pdf_assets").insert(payload).execute()
+        data = getattr(res, "data", None) or []
+        return {"item": data[0] if data else None}
+    except Exception as e:
+        logger.info(f"admin_create_pdf error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create pdf_asset")
+
+
+@app.put("/admin/pdfs/{item_id}")
+async def admin_update_pdf(item_id: str, request: Request, body: PdfAssetUpdate):
+    _ = _require_admin_email(request)
+    try:
+        from supabase import create_client as _create_client
+        public_client, service_key, supabase_url = build_supabase_public()
+        admin = _create_client(supabase_url, service_key)
+        update = {k: v for k, v in body.dict().items() if v is not None}
+        if not update:
+            return {"item": None}
+        res = admin.table("pdf_assets").update(update).eq("id", item_id).execute()
+        data = getattr(res, "data", None) or []
+        return {"item": data[0] if data else None}
+    except Exception as e:
+        logger.info(f"admin_update_pdf error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update pdf_asset")
+
+
+@app.delete("/admin/pdfs/{item_id}")
+async def admin_delete_pdf(item_id: str, request: Request):
+    _ = _require_admin_email(request)
+    try:
+        from supabase import create_client as _create_client
+        public_client, service_key, supabase_url = build_supabase_public()
+        admin = _create_client(supabase_url, service_key)
+        res = admin.table("pdf_assets").delete().eq("id", item_id).execute()
+        data = getattr(res, "data", None) or []
+        return {"deleted": len(data)}
+    except Exception as e:
+        logger.info(f"admin_delete_pdf error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete pdf_asset")

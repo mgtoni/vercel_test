@@ -1,7 +1,7 @@
 import os
 import json as _json
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from urllib import request as _urlreq
 from urllib import parse as _urlparse
 
@@ -127,6 +127,126 @@ def fetch_profile_admin_sdk(
     except Exception as e:
         logger.info(f"Profile fetch (SDK) failed: {e}")
     return None
+
+
+def build_public_storage_url(supabase_url: str, bucket: str, path: str) -> str:
+    base = supabase_url.rstrip("/")
+    path = path.lstrip("/")
+    bucket = bucket.strip("/")
+    return f"{base}/storage/v1/object/public/{bucket}/{path}"
+
+
+def create_signed_storage_url(supabase_url: str, service_key: str, bucket: str, path: str, expires_in: int = 3600) -> Optional[str]:
+    """Create a time-limited signed URL for a storage object.
+
+    Requires service role key. Returns URL or None on failure.
+    """
+    if not service_key or create_client is None:
+        return None
+    try:
+        admin_client = create_client(supabase_url, service_key)
+        res = admin_client.storage.from_(bucket).create_signed_url(path, expires_in)
+        url = getattr(res, "signed_url", None) or (res.get("signed_url") if isinstance(res, dict) else None)
+        return url
+    except Exception as e:
+        logger.info(f"Signed URL generation failed for {bucket}/{path}: {e}")
+        return None
+
+
+def get_pdf_urls_from_storage(
+    *,
+    bucket: str,
+    path1: str,
+    path2: str,
+    path3: str,
+    public: bool,
+    expires_in: int = 3600,
+) -> Dict[str, Optional[str]]:
+    """Resolve three PDF URLs from Supabase Storage, using public or signed URLs.
+
+    Reads Supabase env via build_supabase_public().
+    """
+    public_client, service_key, supabase_url = build_supabase_public()
+    if public:
+        return {
+            "pdf1": build_public_storage_url(supabase_url, bucket, path1),
+            "pdf2": build_public_storage_url(supabase_url, bucket, path2),
+            "pdf3": build_public_storage_url(supabase_url, bucket, path3),
+        }
+    else:
+        return {
+            "pdf1": create_signed_storage_url(supabase_url, service_key, bucket, path1, expires_in),
+            "pdf2": create_signed_storage_url(supabase_url, service_key, bucket, path2, expires_in),
+            "pdf3": create_signed_storage_url(supabase_url, service_key, bucket, path3, expires_in),
+        }
+
+
+def fetch_pdfs_from_manifest(
+    *,
+    group: str,
+    score: Optional[int] = None,
+    limit: int = 10,
+    expires_in: int = 1800,
+) -> List[Dict]:
+    """Query `pdf_assets` manifest by group (and optional score), return signed URLs.
+
+    - When `score` is None: returns items where is_default = true
+    - When `score` is provided: returns items where
+        (score_min is null or score_min <= score) AND (score_max is null or score <= score_max)
+    - Only items where active = true
+    - Ordered by order_index asc
+    """
+    if not group or create_client is None:
+        return []
+    try:
+        public_client, service_key, supabase_url = build_supabase_public()
+        if not service_key:
+            return []
+        admin = create_client(supabase_url, service_key)
+
+        q = (
+            admin
+            .table("pdf_assets")
+            .select("id,bucket,path,label,order_index,is_default,score_min,score_max,active")
+            .eq("group_key", group)
+            .eq("active", True)
+            .order("order_index", desc=False)
+        )
+
+        if score is None:
+            q = q.eq("is_default", True)
+        else:
+            # score_min <= score (or null) AND score <= score_max (or null)
+            q = q.or_(f"score_min.is.null,score_min.lte.{score}")
+            q = q.or_(f"score_max.is.null,score_max.gte.{score}")
+
+        if limit and limit > 0:
+            q = q.limit(limit)
+
+        res = q.execute()
+        items = getattr(res, "data", None) or []
+        out: List[Dict] = []
+        for it in items:
+            b = it.get("bucket")
+            p = it.get("path")
+            url = create_signed_storage_url(supabase_url, service_key, b, p, expires_in)
+            if not url:
+                continue
+            out.append({
+                "id": it.get("id"),
+                "label": it.get("label") or p,
+                "bucket": b,
+                "path": p,
+                "signed_url": url,
+                "order_index": it.get("order_index") or 0,
+                "is_default": bool(it.get("is_default")),
+                "score_min": it.get("score_min"),
+                "score_max": it.get("score_max"),
+            })
+        return out
+    except Exception as e:
+        logger.info(f"fetch_pdfs_from_manifest failed: {e}")
+        return []
 
 
 def check_email_exists_rest(public_client, supabase_url: str, service_key: str, email: str) -> Dict:
