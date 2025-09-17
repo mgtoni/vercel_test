@@ -2,6 +2,14 @@ import logging
 from typing import Optional, Dict
 from fastapi import HTTPException, Request
 
+from .admin_auth import (
+    SESSION_COOKIE,
+    as_bool,
+    decode_session_payload,
+    fetch_admin_user,
+    requires_password_change,
+    verify_session_token,
+)
 from .core_supabase import build_supabase_public, create_signed_upload_url
 
 logger = logging.getLogger("api3.admin_checks")
@@ -12,44 +20,34 @@ def require_admin(request: Request) -> str:
 
     Returns the admin email on success; raises HTTPException otherwise.
     """
-    try:
-        token = request.cookies.get("sb_access_token")
-        if not token:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        public_client, service_key, supabase_url = build_supabase_public()
-        user_res = public_client.auth.get_user(token)
-        user = getattr(user_res, "user", None)
-        email = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None)
-        if not email:
-            raise HTTPException(status_code=401, detail="Invalid session")
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
-        # Check admin_users table for active admin
-        try:
-            from supabase import create_client as _create_client
-            admin = _create_client(supabase_url, service_key)
-            res = (
-                admin.table("admin_users")
-                .select("email, active")
-                .eq("email", email)
-                .eq("active", True)
-                .limit(1)
-                .execute()
-            )
-            data = getattr(res, "data", None) or []
-            if not data:
-                raise HTTPException(status_code=403, detail="Not authorized")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.info(f"admin table check failed: {e}")
-            raise HTTPException(status_code=500, detail="Admin check failed")
+    payload = decode_session_payload(token)
+    email = (payload or {}).get("email") if payload else None
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid session")
 
-        return email
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.info(f"require_admin error: {e}")
-        raise HTTPException(status_code=401, detail="Admin verification failed")
+    admin_row = fetch_admin_user(email)
+    if not admin_row:
+        raise HTTPException(status_code=401, detail="Admin not found")
+
+    if "active" in admin_row and not as_bool(admin_row.get("active")):
+        raise HTTPException(status_code=403, detail="Admin access disabled")
+
+    stored_hash = admin_row.get("password_hash")
+    if not stored_hash or not str(stored_hash).startswith("$2"):
+        raise HTTPException(status_code=401, detail="Admin session invalidated")
+
+    session_data = verify_session_token(token, str(stored_hash))
+    if not session_data:
+        raise HTTPException(status_code=401, detail="Session expired")
+
+    if requires_password_change(admin_row, True):
+        raise HTTPException(status_code=403, detail="Password update required")
+
+    return email
 
 
 def normalize_admin_path(value: Optional[str]) -> str:

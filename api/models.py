@@ -49,3 +49,13 @@ class PdfAssetUpdate(BaseModel):
     score_min: Optional[int] = None
     score_max: Optional[int] = None
     active: Optional[bool] = None
+
+
+class AdminLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AdminPasswordResetRequest(BaseModel):
+    reset_token: str
+    new_password: str

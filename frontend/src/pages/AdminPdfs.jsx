@@ -43,6 +43,7 @@ export default function AdminPdfs() {
   const [editItem, setEditItem] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [upload, setUpload] = useState({ bucket: "", dest_path: "", label: "", order_index: 0, is_default: false, score_min: "", score_max: "", active: true, file: null });
+  const [adminEmail, setAdminEmail] = useState("");
 
   const adminPath = useMemo(() => `/api/admin/pdfs`, []);
 
@@ -50,6 +51,10 @@ export default function AdminPdfs() {
     setLoading(true); setError("");
     try {
       const res = await fetch(`${adminPath}?group=${encodeURIComponent(group)}`, { credentials: "same-origin" });
+      if (res.status === 401 || res.status === 403) {
+        navigate('/admin/login', { replace: true });
+        return;
+      }
       if (!res.ok) {
         const txt = await res.text();
         throw new Error(txt || `HTTP ${res.status}`);
@@ -63,6 +68,16 @@ export default function AdminPdfs() {
     }
   };
 
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/admin/logout', { method: 'POST', credentials: 'same-origin' });
+    } catch (err) {
+      console.warn('Admin logout request failed', err);
+    } finally {
+      navigate('/admin/login', { replace: true });
+    }
+  };
+
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [group]);
 
   // Admin gate: verify admin session on mount
@@ -70,12 +85,17 @@ export default function AdminPdfs() {
     (async () => {
       try {
         const res = await fetch('/api/admin/me', { credentials: 'same-origin' });
-        if (!res.ok) throw new Error('not admin');
+        if (res.status === 200) {
+          const data = await res.json().catch(() => ({}));
+          setAdminEmail(data?.email || "");
+          return;
+        }
+        navigate('/admin/login', { replace: true });
       } catch (e) {
-        navigate('/');
+        navigate('/admin/login', { replace: true });
       }
     })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+// eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const create = async () => {
@@ -86,6 +106,10 @@ export default function AdminPdfs() {
         credentials: "same-origin",
         body: JSON.stringify(newItem),
       });
+      if (res.status === 401 || res.status === 403) {
+        navigate('/admin/login', { replace: true });
+        return;
+      }
       if (!res.ok) throw new Error(await res.text());
       setCreating(false);
       setNewItem({ group_key: group, bucket: "", path: "", label: "", order_index: 0, is_default: false, score_min: null, score_max: null, active: true });
@@ -103,6 +127,10 @@ export default function AdminPdfs() {
         credentials: "same-origin",
         body: JSON.stringify(editItem),
       });
+      if (res.status === 401 || res.status === 403) {
+        navigate('/admin/login', { replace: true });
+        return;
+      }
       if (!res.ok) throw new Error(await res.text());
       setEditingId(null);
       setEditItem(null);
@@ -116,6 +144,10 @@ export default function AdminPdfs() {
     if (!window.confirm("Delete this item?")) return;
     try {
       const res = await fetch(`${adminPath}/${id}`, { method: "DELETE", credentials: "same-origin" });
+      if (res.status === 401 || res.status === 403) {
+        navigate('/admin/login', { replace: true });
+        return;
+      }
       if (!res.ok) throw new Error(await res.text());
       await load();
     } catch (e) {
@@ -125,7 +157,13 @@ export default function AdminPdfs() {
 
   return (
     <div style={{ padding: 16 }}>
-      <h2>PDF Assets Admin</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <h2>PDF Assets Admin</h2>
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          {adminEmail ? <span style={{ fontSize: 14, color: "#444" }}>Signed in as {adminEmail}</span> : null}
+          <button onClick={handleLogout}>Log out</button>
+        </div>
+      </div>
       <div style={{ marginBottom: 12, display: "flex", gap: 12, alignItems: "flex-end" }}>
         <Field label="Group">
           <input value={group} onChange={(e)=>setGroup(e.target.value)} placeholder="e.g., profile" />
@@ -184,6 +222,10 @@ export default function AdminPdfs() {
                 prep.append('dest_path', upload.dest_path || '');
                 prep.append('filename', upload.file.name);
                 const up = await fetch('/api/admin/upload-url', { method: 'POST', body: prep, credentials: 'same-origin' });
+                if (up.status === 401 || up.status === 403) {
+                  navigate('/admin/login', { replace: true });
+                  return;
+                }
                 if (!up.ok) throw new Error(await up.text());
                 const upData = await up.json();
 
@@ -213,6 +255,10 @@ export default function AdminPdfs() {
                   credentials: 'same-origin',
                   body: JSON.stringify(manifest),
                 });
+                if (manRes.status === 401 || manRes.status === 403) {
+                  navigate('/admin/login', { replace: true });
+                  return;
+                }
                 if (!manRes.ok) throw new Error(await manRes.text());
 
                 await load();

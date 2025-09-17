@@ -1,10 +1,31 @@
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Request, Form
+from fastapi import APIRouter, HTTPException, Request, Form, Response
 
-from ..models import PdfAssetCreate, PdfAssetUpdate
+from ..models import (
+    AdminLoginRequest,
+    AdminPasswordResetRequest,
+    PdfAssetCreate,
+    PdfAssetUpdate,
+)
+from ..utils.admin_auth import (
+    SESSION_COOKIE,
+    SESSION_TTL_SECONDS,
+    as_bool,
+    build_password_update_payload,
+    create_reset_token,
+    create_session_token,
+    decode_reset_payload,
+    fetch_admin_user,
+    hash_password,
+    requires_password_change,
+    update_admin_user,
+    verify_password,
+    verify_reset_token,
+)
 from ..utils.admin_checks import require_admin
 from ..utils.core_supabase import build_supabase_public, create_signed_upload_url
+from ..utils.crypto_utils import mask_email_for_log
 
 router = APIRouter(prefix="/admin")
 logger = logging.getLogger("api3.routes.admin")
@@ -14,6 +35,126 @@ logger = logging.getLogger("api3.routes.admin")
 async def admin_me(request: Request):
     email = require_admin(request)
     return {"email": email, "is_admin": True}
+
+
+@router.post("/login")
+async def admin_login(body: AdminLoginRequest, response: Response):
+    raw_email = (body.email or "").strip()
+    password = (body.password or "").strip()
+    if not raw_email or not password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+
+    admin_row = fetch_admin_user(raw_email)
+    if not admin_row:
+        logger.info(f"Admin login failed (no user): {mask_email_for_log(raw_email)}")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    email = admin_row.get("email") or raw_email
+
+    if "active" in admin_row and not as_bool(admin_row.get("active")):
+        raise HTTPException(status_code=403, detail="Admin access disabled")
+
+    stored_value = (
+        admin_row.get("password_hash")
+        or admin_row.get("password")
+        or admin_row.get("password_temp")
+    )
+
+    matched, is_hashed = verify_password(password, stored_value)
+    if not matched:
+        logger.info(f"Admin login failed (bad password): {mask_email_for_log(email)}")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    if requires_password_change(admin_row, is_hashed):
+        reset_token = create_reset_token(email, str(stored_value) if stored_value else None)
+        logger.info(f"Admin login requires password change: {mask_email_for_log(email)}")
+        return {
+            "ok": True,
+            "requires_password_change": True,
+            "reset_token": reset_token,
+        }
+
+    session_token = create_session_token(email, str(stored_value))
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=SESSION_TTL_SECONDS,
+        path="/",
+    )
+    logger.info(f"Admin login success: {mask_email_for_log(email)}")
+    return {"ok": True, "requires_password_change": False, "email": email}
+
+
+@router.post("/password")
+async def admin_update_password(body: AdminPasswordResetRequest, response: Response):
+    payload = decode_reset_payload(body.reset_token)
+    if not payload:
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+    email = payload.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+
+    admin_row = fetch_admin_user(email)
+    if not admin_row:
+        raise HTTPException(status_code=400, detail="Admin not found")
+
+    canonical_email = admin_row.get("email") or email
+
+    if "active" in admin_row and not as_bool(admin_row.get("active")):
+        raise HTTPException(status_code=403, detail="Admin access disabled")
+
+    stored_value = (
+        admin_row.get("password_hash")
+        or admin_row.get("password")
+        or admin_row.get("password_temp")
+    )
+    if not stored_value:
+        raise HTTPException(status_code=400, detail="Admin password not set")
+
+    verified = verify_reset_token(body.reset_token, str(stored_value))
+    if not verified:
+        raise HTTPException(status_code=400, detail="Reset token expired or invalid")
+
+    new_password = (body.new_password or "").strip()
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    new_hash = hash_password(new_password)
+    update_payload = build_password_update_payload(admin_row, new_hash)
+    updated = update_admin_user(email, update_payload)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to update password")
+
+    session_token = create_session_token(canonical_email, new_hash)
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=SESSION_TTL_SECONDS,
+        path="/",
+    )
+    logger.info(f"Admin password updated: {mask_email_for_log(canonical_email)}")
+    return {"ok": True, "email": canonical_email}
+
+
+@router.post("/logout")
+async def admin_logout(response: Response):
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value="",
+        max_age=0,
+        expires=0,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+    return {"ok": True}
 
 
 @router.get("/pdfs")

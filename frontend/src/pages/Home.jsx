@@ -8,6 +8,7 @@ function Home() {
       <div style={{ display: 'flex', gap: '1rem' }}>
         <Link to="/form">Go to Form</Link>
         <Link to="/profile">Go to Profile</Link>
+        <Link to="/admin/login">Admin Login</Link>
       </div>
     </div>
   );
