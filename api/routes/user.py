@@ -190,6 +190,8 @@ async def auth_root(request: Request, response: Response):
     if qp == "admin/upload-url":
         # Handle admin signed upload URL creation here to avoid JSON parsing
         return await handle_admin_upload(request)
+    if qp.startswith("admin"):
+        raise HTTPException(status_code=404, detail="Not found")
 
     # Default: treat as auth proxy expecting JSON body for AuthData
     try:
@@ -203,9 +205,10 @@ async def auth_root(request: Request, response: Response):
 @router.post("/{_path:path}")
 async def auth_any_path(_path: str, request: Request, response: Response):
     normalized_path = normalize_admin_path(_path)
-    if normalized_path == "admin/upload-url" or normalize_admin_path(request.query_params.get("path")) == "admin/upload-url":
+    qp_normalized = normalize_admin_path(request.query_params.get("path"))
+    if normalized_path == "admin/upload-url" or qp_normalized == "admin/upload-url":
         return await handle_admin_upload(request)
-    if normalized_path.startswith("admin"):
+    if normalized_path.startswith("admin") or qp_normalized.startswith("admin"):
         raise HTTPException(status_code=404, detail="Not found")
     try:
         body = await request.json()

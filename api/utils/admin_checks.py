@@ -55,7 +55,7 @@ def require_admin(request: Request) -> str:
 def normalize_admin_path(value: Optional[str]) -> str:
     """Normalize admin path fragments for routing checks.
 
-    Returns a lowercase path without leading/trailing slashes.
+    Returns a lowercase path with the admin portion prioritized.
     """
     if value is None:
         return ""
@@ -63,9 +63,15 @@ def normalize_admin_path(value: Optional[str]) -> str:
     if not cleaned:
         return ""
     cleaned = cleaned.split('?', 1)[0]
-    cleaned = cleaned.lstrip('/')
-    cleaned = cleaned.rstrip('/')
-    return cleaned.lower()
+    parts = [segment for segment in cleaned.strip('/').split('/') if segment]
+    if not parts:
+        return ""
+    try:
+        admin_index = parts.index('admin')
+        parts = parts[admin_index:]
+    except ValueError:
+        pass
+    return '/'.join(parts).lower()
 
 
 async def handle_admin_upload(request: Request) -> Dict[str, str]:
