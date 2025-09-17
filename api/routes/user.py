@@ -180,7 +180,46 @@ async def auth(data: AuthData, response: Response):
 
 
 @router.post("/")
-async def auth_root(data: AuthData, response: Response):
+async def auth_root(request: Request, response: Response):
+    # Support Vercel rewrite that passes subpath in query param `path`
+    try:
+        qp = (request.query_params.get("path") or "").strip().lstrip("/")
+    except Exception:
+        qp = ""
+    if qp.lower() == "admin/upload-url":
+        # Handle admin signed upload URL creation here to avoid JSON parsing
+        try:
+            from ..utils.admin_checks import require_admin
+            from ..utils.core_supabase import build_supabase_public, create_signed_upload_url
+            _ = require_admin(request)
+            form = await request.form()
+            bucket = (form.get("bucket") or "").strip()
+            dest_path = (form.get("dest_path") or "").strip()
+            filename = (form.get("filename") or "").strip()
+            if not bucket or not filename:
+                raise HTTPException(status_code=400, detail="bucket and filename are required")
+            safe_name = filename.split("/")[-1]
+            if dest_path.endswith("/") or dest_path == "":
+                final_path = (dest_path + safe_name).lstrip("/")
+            else:
+                final_path = dest_path.lstrip("/")
+            _public, service_key, supabase_url = build_supabase_public()
+            info = create_signed_upload_url(supabase_url, service_key, bucket, final_path)
+            if not info:
+                raise HTTPException(status_code=500, detail="Failed to create signed upload URL")
+            return {"bucket": bucket, "path": final_path, **info}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.info(f"root admin/upload-url error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to create signed upload URL")
+
+    # Default: treat as auth proxy expecting JSON body for AuthData
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    data = AuthData(**body)
     return await auth(data, response)
 
 
