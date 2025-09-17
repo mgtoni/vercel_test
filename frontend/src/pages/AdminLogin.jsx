@@ -13,6 +13,13 @@ export default function AdminLogin() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    const hasAdminSessionCookie = (() => {
+      if (typeof document === "undefined") return false;
+      return document.cookie.split(";").some((part) => part.trim().startsWith("admin_session="));
+    })();
+    if (!hasAdminSessionCookie) {
+      return;
+    }
     (async () => {
       try {
         const res = await fetch("/api/admin/me", { credentials: "same-origin" });
