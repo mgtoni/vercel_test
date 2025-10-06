@@ -2,12 +2,13 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from ..models import AuthData, ProfileReq
+from ..models import AuthData, ProfileReq, AdminLoginRequest, AdminPasswordResetRequest
 from ..utils.core_supabase import build_supabase_public, admin_get_user_by_email_rest, fetch_profile_admin_sdk
 from ..utils.admin_checks import handle_admin_upload, normalize_admin_path
 from ..utils.crypto_utils import decrypt_auth_payload, aesgcm_encrypt_profile, mask_email_for_log
 from ..utils.common import normalize_email
 from ..utils.user_content import fetch_pdfs_from_manifest
+from .admin import admin_login as _admin_login_handler, admin_update_password as _admin_update_password_handler, admin_logout as _admin_logout_handler
 
 router = APIRouter()
 logger = logging.getLogger("api3.routes.user")
@@ -190,6 +191,16 @@ async def auth_root(request: Request, response: Response):
     if qp == "admin/upload-url":
         # Handle admin signed upload URL creation here to avoid JSON parsing
         return await handle_admin_upload(request)
+    if qp == "admin/login":
+        body = await request.json()
+        data = AdminLoginRequest(**body)
+        return await _admin_login_handler(data, response)
+    if qp == "admin/password":
+        body = await request.json()
+        data = AdminPasswordResetRequest(**body)
+        return await _admin_update_password_handler(data, response)
+    if qp == "admin/logout":
+        return await _admin_logout_handler(response)
     if qp.startswith("admin"):
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -208,6 +219,16 @@ async def auth_any_path(_path: str, request: Request, response: Response):
     qp_normalized = normalize_admin_path(request.query_params.get("path"))
     if normalized_path == "admin/upload-url" or qp_normalized == "admin/upload-url":
         return await handle_admin_upload(request)
+    if normalized_path == "admin/login" or qp_normalized == "admin/login":
+        body = await request.json()
+        data = AdminLoginRequest(**body)
+        return await _admin_login_handler(data, response)
+    if normalized_path == "admin/password" or qp_normalized == "admin/password":
+        body = await request.json()
+        data = AdminPasswordResetRequest(**body)
+        return await _admin_update_password_handler(data, response)
+    if normalized_path == "admin/logout" or qp_normalized == "admin/logout":
+        return await _admin_logout_handler(response)
     if normalized_path.startswith("admin") or qp_normalized.startswith("admin"):
         raise HTTPException(status_code=404, detail="Not found")
     try:
