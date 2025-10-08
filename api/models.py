@@ -24,11 +24,9 @@ class ProfileReq(BaseModel):
 
 # Admin: pdf_assets manifest models
 class PdfAssetBase(BaseModel):
-    group_key: str
-    bucket: str
+    module: str
+    lesson: Optional[str] = None
     path: str
-    label: Optional[str] = None
-    order_index: Optional[int] = 0
     is_default: Optional[bool] = False
     score_min: Optional[int] = None
     score_max: Optional[int] = None
@@ -40,11 +38,9 @@ class PdfAssetCreate(PdfAssetBase):
 
 
 class PdfAssetUpdate(BaseModel):
-    group_key: Optional[str] = None
-    bucket: Optional[str] = None
+    module: Optional[str] = None
+    lesson: Optional[str] = None
     path: Optional[str] = None
-    label: Optional[str] = None
-    order_index: Optional[int] = None
     is_default: Optional[bool] = None
     score_min: Optional[int] = None
     score_max: Optional[int] = None
@@ -59,3 +55,4 @@ class AdminLoginRequest(BaseModel):
 class AdminPasswordResetRequest(BaseModel):
     reset_token: str
     new_password: str
+

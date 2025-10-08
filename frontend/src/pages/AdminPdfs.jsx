@@ -1,3 +1,4 @@
+
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -14,11 +15,9 @@ function RowEditor({ value, onChange, onSave, onCancel }) {
   const v = value || {};
   return (
     <tr>
-      <td><input value={v.group_key || ""} onChange={(e)=>onChange({ ...v, group_key: e.target.value })} /></td>
-      <td><input value={v.bucket || ""} onChange={(e)=>onChange({ ...v, bucket: e.target.value })} /></td>
+      <td><input value={v.module || ""} onChange={(e)=>onChange({ ...v, module: e.target.value })} /></td>
+      <td><input value={v.lesson || ""} onChange={(e)=>onChange({ ...v, lesson: e.target.value })} /></td>
       <td><input value={v.path || ""} onChange={(e)=>onChange({ ...v, path: e.target.value })} /></td>
-      <td><input value={v.label || ""} onChange={(e)=>onChange({ ...v, label: e.target.value })} /></td>
-      <td><input type="number" value={v.order_index ?? 0} onChange={(e)=>onChange({ ...v, order_index: Number(e.target.value) })} style={{ width: 70 }} /></td>
       <td><input type="checkbox" checked={!!v.is_default} onChange={(e)=>onChange({ ...v, is_default: e.target.checked })} /></td>
       <td><input type="number" value={v.score_min ?? ""} onChange={(e)=>onChange({ ...v, score_min: e.target.value === '' ? null : Number(e.target.value) })} style={{ width: 70 }} /></td>
       <td><input type="number" value={v.score_max ?? ""} onChange={(e)=>onChange({ ...v, score_max: e.target.value === '' ? null : Number(e.target.value) })} style={{ width: 70 }} /></td>
@@ -34,15 +33,18 @@ function RowEditor({ value, onChange, onSave, onCancel }) {
 export default function AdminPdfs() {
   const navigate = useNavigate();
   const [items, setItems] = useState([]);
-  const [group, setGroup] = useState("profile");
+  const [moduleFilter, setModuleFilter] = useState("");
+  const [lessonFilter, setLessonFilter] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
-  const [newItem, setNewItem] = useState({ group_key: "profile", bucket: "", path: "", label: "", order_index: 0, is_default: false, score_min: null, score_max: null, active: true });
+  const createEmptyItem = (moduleVal = "", lessonVal = "") => ({ module: moduleVal, lesson: lessonVal, path: "", is_default: false, score_min: null, score_max: null, active: true });
+  const [newItem, setNewItem] = useState(createEmptyItem());
   const [editingId, setEditingId] = useState(null);
   const [editItem, setEditItem] = useState(null);
   const [uploading, setUploading] = useState(false);
-  const [upload, setUpload] = useState({ bucket: "", dest_path: "", label: "", order_index: 0, is_default: false, score_min: "", score_max: "", active: true, file: null });
+  const createEmptyUpload = (moduleVal = "", lessonVal = "") => ({ module: moduleVal, lesson: lessonVal, is_default: false, score_min: "", score_max: "", active: true, file: null });
+  const [upload, setUpload] = useState(createEmptyUpload());
   const [adminEmail, setAdminEmail] = useState("");
 
   const adminPath = useMemo(() => `/api/admin/pdfs`, []);
@@ -50,7 +52,11 @@ export default function AdminPdfs() {
   const load = async () => {
     setLoading(true); setError("");
     try {
-      const res = await fetch(`${adminPath}?group=${encodeURIComponent(group)}`, { credentials: "same-origin" });
+      const params = new URLSearchParams();
+      if (moduleFilter.trim()) params.set("module", moduleFilter.trim());
+      if (lessonFilter.trim()) params.set("lesson", lessonFilter.trim());
+      const qs = params.toString();
+      const res = await fetch(qs ? `${adminPath}?${qs}` : adminPath, { credentials: "same-origin" });
       if (res.status === 401 || res.status === 403) {
         navigate('/admin/login', { replace: true });
         return;
@@ -78,7 +84,7 @@ export default function AdminPdfs() {
     }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [group]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [moduleFilter, lessonFilter]);
 
   // Admin gate: verify admin session on mount
   useEffect(() => {
@@ -98,13 +104,31 @@ export default function AdminPdfs() {
 // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const resetNewItem = () => setNewItem(createEmptyItem(moduleFilter.trim(), lessonFilter.trim()));
+  const resetUpload = () => setUpload(createEmptyUpload(moduleFilter.trim(), lessonFilter.trim()));
+
   const create = async () => {
+    const trimmedModule = (newItem.module || '').trim();
+    const trimmedPath = (newItem.path || '').trim();
+    if (!trimmedModule || !trimmedPath) {
+      alert('Module and path are required');
+      return;
+    }
     try {
+      const payload = {
+        module: trimmedModule,
+        lesson: (newItem.lesson || '').trim() || null,
+        path: trimmedPath,
+        is_default: !!newItem.is_default,
+        score_min: newItem.score_min === null ? null : Number(newItem.score_min),
+        score_max: newItem.score_max === null ? null : Number(newItem.score_max),
+        active: newItem.active !== false,
+      };
       const res = await fetch(adminPath, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify(newItem),
+        body: JSON.stringify(payload),
       });
       if (res.status === 401 || res.status === 403) {
         navigate('/admin/login', { replace: true });
@@ -112,7 +136,7 @@ export default function AdminPdfs() {
       }
       if (!res.ok) throw new Error(await res.text());
       setCreating(false);
-      setNewItem({ group_key: group, bucket: "", path: "", label: "", order_index: 0, is_default: false, score_min: null, score_max: null, active: true });
+      resetNewItem();
       await load();
     } catch (e) {
       alert(`Create failed: ${e.message || e}`);
@@ -120,12 +144,28 @@ export default function AdminPdfs() {
   };
 
   const saveEdit = async (id) => {
+    if (!editItem) return;
+    const trimmedModule = (editItem.module || '').trim();
+    const trimmedPath = (editItem.path || '').trim();
+    if (!trimmedModule || !trimmedPath) {
+      alert('Module and path are required');
+      return;
+    }
+    const payload = {
+      module: trimmedModule,
+      lesson: (editItem.lesson || '').trim() || null,
+      path: trimmedPath,
+      is_default: !!editItem.is_default,
+      score_min: editItem.score_min === null ? null : Number(editItem.score_min),
+      score_max: editItem.score_max === null ? null : Number(editItem.score_max),
+      active: editItem.active !== false,
+    };
     try {
       const res = await fetch(`${adminPath}/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify(editItem),
+        body: JSON.stringify(payload),
       });
       if (res.status === 401 || res.status === 403) {
         navigate('/admin/login', { replace: true });
@@ -165,8 +205,11 @@ export default function AdminPdfs() {
         </div>
       </div>
       <div style={{ marginBottom: 12, display: "flex", gap: 12, alignItems: "flex-end" }}>
-        <Field label="Group">
-          <input value={group} onChange={(e)=>setGroup(e.target.value)} placeholder="e.g., profile" />
+        <Field label="Module">
+          <input value={moduleFilter} onChange={(e)=>setModuleFilter(e.target.value)} placeholder="e.g., module-1" />
+        </Field>
+        <Field label="Lesson">
+          <input value={lessonFilter} onChange={(e)=>setLessonFilter(e.target.value)} placeholder="optional lesson prefix" />
         </Field>
         <button onClick={load}>Refresh</button>
       </div>
@@ -174,15 +217,13 @@ export default function AdminPdfs() {
       {error ? <div style={{ color: "#b00", marginBottom: 12 }}>{error}</div> : null}
 
       <div style={{ marginBottom: 16 }}>
-        <button onClick={() => setCreating((v) => !v)}>{creating ? "Close" : "New Item"}</button>
+        <button onClick={() => { const next = !creating; setCreating(next); if (next) resetNewItem(); }}>{creating ? "Close" : "New Item"}</button>
         {creating && (
           <div style={{ border: "1px solid #ddd", padding: 12, marginTop: 12 }}>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-              <Field label="Group"><input value={newItem.group_key} onChange={(e)=>setNewItem({ ...newItem, group_key: e.target.value })} /></Field>
-              <Field label="Bucket"><input value={newItem.bucket} onChange={(e)=>setNewItem({ ...newItem, bucket: e.target.value })} /></Field>
-              <Field label="Path"><input value={newItem.path} onChange={(e)=>setNewItem({ ...newItem, path: e.target.value })} /></Field>
-              <Field label="Label"><input value={newItem.label || ""} onChange={(e)=>setNewItem({ ...newItem, label: e.target.value })} /></Field>
-              <Field label="Order"><input type="number" value={newItem.order_index ?? 0} onChange={(e)=>setNewItem({ ...newItem, order_index: Number(e.target.value) })} /></Field>
+              <Field label="Module"><input value={newItem.module} onChange={(e)=>setNewItem({ ...newItem, module: e.target.value })} /></Field>
+              <Field label="Lesson"><input value={newItem.lesson || ""} onChange={(e)=>setNewItem({ ...newItem, lesson: e.target.value })} placeholder="optional" /></Field>
+              <Field label="Path"><input value={newItem.path} onChange={(e)=>setNewItem({ ...newItem, path: e.target.value })} placeholder="storage path incl. filename" /></Field>
               <Field label="Default"><input type="checkbox" checked={!!newItem.is_default} onChange={(e)=>setNewItem({ ...newItem, is_default: e.target.checked })} /></Field>
               <Field label="Score Min"><input type="number" value={newItem.score_min ?? ""} onChange={(e)=>setNewItem({ ...newItem, score_min: e.target.value === '' ? null : Number(e.target.value) })} /></Field>
               <Field label="Score Max"><input type="number" value={newItem.score_max ?? ""} onChange={(e)=>setNewItem({ ...newItem, score_max: e.target.value === '' ? null : Number(e.target.value) })} /></Field>
@@ -200,11 +241,8 @@ export default function AdminPdfs() {
         <h3>Upload PDF to Storage + Create Manifest</h3>
         <div style={{ border: "1px solid #ddd", padding: 12, marginTop: 12 }}>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <Field label="Bucket"><input value={upload.bucket} onChange={(e)=>setUpload({ ...upload, bucket: e.target.value })} placeholder="private bucket name" /></Field>
-            <Field label="Dest Path / Prefix"><input value={upload.dest_path} onChange={(e)=>setUpload({ ...upload, dest_path: e.target.value })} placeholder="e.g., profile/default/ or profile/score-5/" /></Field>
-            <Field label="Group"><input value={group} onChange={(e)=>setGroup(e.target.value)} /></Field>
-            <Field label="Label"><input value={upload.label} onChange={(e)=>setUpload({ ...upload, label: e.target.value })} /></Field>
-            <Field label="Order"><input type="number" value={upload.order_index ?? 0} onChange={(e)=>setUpload({ ...upload, order_index: Number(e.target.value) })} /></Field>
+            <Field label="Module"><input value={upload.module} onChange={(e)=>setUpload({ ...upload, module: e.target.value })} placeholder="storage bucket" /></Field>
+            <Field label="Lesson"><input value={upload.lesson} onChange={(e)=>setUpload({ ...upload, lesson: e.target.value })} placeholder="e.g., lesson-1/" /></Field>
             <Field label="Default"><input type="checkbox" checked={!!upload.is_default} onChange={(e)=>setUpload({ ...upload, is_default: e.target.checked })} /></Field>
             <Field label="Score Min"><input type="number" value={upload.score_min} onChange={(e)=>setUpload({ ...upload, score_min: e.target.value })} /></Field>
             <Field label="Score Max"><input type="number" value={upload.score_max} onChange={(e)=>setUpload({ ...upload, score_max: e.target.value })} /></Field>
@@ -213,13 +251,13 @@ export default function AdminPdfs() {
           </div>
           <div style={{ marginTop: 12 }}>
             <button disabled={uploading} onClick={async ()=>{
-              if (!upload.bucket || !upload.file) { alert('Bucket and file are required'); return; }
+              const moduleValue = (upload.module || moduleFilter).trim();
+              if (!moduleValue || !upload.file) { alert('Module and file are required'); return; }
               setUploading(true);
               try {
-                // Step 1: Get signed upload URL
                 const prep = new FormData();
-                prep.append('bucket', upload.bucket);
-                prep.append('dest_path', upload.dest_path || '');
+                prep.append('module', moduleValue);
+                prep.append('lesson', (upload.lesson || lessonFilter || '').trim());
                 prep.append('filename', upload.file.name);
                 const up = await fetch('/api/admin/upload-url', { method: 'POST', body: prep, credentials: 'same-origin' });
                 if (up.status === 401 || up.status === 403) {
@@ -229,7 +267,6 @@ export default function AdminPdfs() {
                 if (!up.ok) throw new Error(await up.text());
                 const upData = await up.json();
 
-                // Step 2: PUT file to signed URL (direct to Supabase Storage)
                 const putRes = await fetch(upData.signed_url, {
                   method: 'PUT',
                   headers: { 'Content-Type': upload.file.type || 'application/pdf' },
@@ -237,13 +274,10 @@ export default function AdminPdfs() {
                 });
                 if (!putRes.ok) throw new Error(`Upload to storage failed: ${putRes.status}`);
 
-                // Step 3: Create manifest row
                 const manifest = {
-                  group_key: group,
-                  bucket: upload.bucket,
+                  module: upData.module || moduleValue,
+                  lesson: (upload.lesson || lessonFilter || '').trim() || null,
                   path: upData.path,
-                  label: upload.label || upload.file.name,
-                  order_index: upload.order_index ?? 0,
                   is_default: !!upload.is_default,
                   score_min: upload.score_min === '' ? null : Number(upload.score_min),
                   score_max: upload.score_max === '' ? null : Number(upload.score_max),
@@ -263,6 +297,7 @@ export default function AdminPdfs() {
 
                 await load();
                 alert('Uploaded successfully');
+                resetUpload();
               } catch (e) {
                 alert(`Upload failed: ${e.message || e}`);
               } finally {
@@ -277,11 +312,9 @@ export default function AdminPdfs() {
         <table style={{ borderCollapse: "collapse", width: "100%" }}>
           <thead>
             <tr>
-              <th>Group</th>
-              <th>Bucket</th>
+              <th>Module</th>
+              <th>Lesson</th>
               <th>Path</th>
-              <th>Label</th>
-              <th>Order</th>
               <th>Default</th>
               <th>Score Min</th>
               <th>Score Max</th>
@@ -291,9 +324,9 @@ export default function AdminPdfs() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={10} style={{ textAlign: "center" }}>Loading…</td></tr>
+              <tr><td colSpan={8} style={{ textAlign: "center" }}>Loading...</td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={10} style={{ textAlign: "center" }}>No items</td></tr>
+              <tr><td colSpan={8} style={{ textAlign: "center" }}>No items</td></tr>
             ) : items.map((it) => (
               editingId === it.id ? (
                 <RowEditor
@@ -305,11 +338,9 @@ export default function AdminPdfs() {
                 />
               ) : (
                 <tr key={it.id}>
-                  <td>{it.group_key}</td>
-                  <td>{it.bucket}</td>
+                  <td>{it.module}</td>
+                  <td>{it.lesson || ''}</td>
                   <td>{it.path}</td>
-                  <td>{it.label}</td>
-                  <td>{it.order_index}</td>
                   <td>{it.is_default ? "Yes" : "No"}</td>
                   <td>{it.score_min ?? ""}</td>
                   <td>{it.score_max ?? ""}</td>

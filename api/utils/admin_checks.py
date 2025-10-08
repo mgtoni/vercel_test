@@ -77,21 +77,21 @@ async def handle_admin_upload(request: Request) -> Dict[str, str]:
     try:
         require_admin(request)
         form = await request.form()
-        bucket = (form.get("bucket") or "").strip()
-        dest_path = (form.get("dest_path") or "").strip()
+        module = (form.get("module") or "").strip()
+        lesson = (form.get("lesson") or "").strip()
         filename = (form.get("filename") or "").strip()
-        if not bucket or not filename:
-            raise HTTPException(status_code=400, detail="bucket and filename are required")
+        if not module or not filename:
+            raise HTTPException(status_code=400, detail="module and filename are required")
         safe_name = filename.split("/")[-1]
-        if dest_path.endswith("/") or dest_path == "":
-            final_path = (dest_path + safe_name).lstrip("/")
+        if lesson.endswith("/") or lesson == "":
+            final_path = (lesson + safe_name).lstrip("/")
         else:
-            final_path = dest_path.lstrip("/")
+            final_path = lesson.lstrip("/")
         _public, service_key, supabase_url = build_supabase_public()
-        info = create_signed_upload_url(supabase_url, service_key, bucket, final_path)
+        info = create_signed_upload_url(supabase_url, service_key, module, final_path)
         if not info:
             raise HTTPException(status_code=500, detail="Failed to create signed upload URL")
-        return {"bucket": bucket, "path": final_path, **info}
+        return {"module": module, "path": final_path, **info}
     except HTTPException:
         raise
     except Exception as e:

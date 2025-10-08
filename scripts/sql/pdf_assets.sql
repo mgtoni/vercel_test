@@ -1,21 +1,25 @@
+
 -- Create a manifest table for PDFs stored in Supabase Storage
 -- Adjust schema/columns as needed for your app
 
 create table if not exists public.pdf_assets (
   id uuid primary key default gen_random_uuid(),
-  bucket text not null,
+  module text not null,
+  lesson text,
   path text not null,
-  order_index integer not null default 0,
   is_default boolean not null default false,
   score_min integer,
-  score_max integer
+  score_max integer,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
 -- Indexes to speed up queries
-create index if not exists idx_pdf_assets_group on public.pdf_assets (group_key);
-create index if not exists idx_pdf_assets_group_default on public.pdf_assets (group_key, is_default);
+create index if not exists idx_pdf_assets_module on public.pdf_assets (module);
+create index if not exists idx_pdf_assets_module_default on public.pdf_assets (module, is_default);
+create index if not exists idx_pdf_assets_module_lesson on public.pdf_assets (module, lesson);
 create index if not exists idx_pdf_assets_active on public.pdf_assets (active);
-create index if not exists idx_pdf_assets_order on public.pdf_assets (group_key, order_index);
 
 -- Basic RLS setup (you may customize to your needs)
 alter table public.pdf_assets enable row level security;
@@ -35,4 +39,3 @@ end $$;
 -- Optional: policy to allow read-only for authenticated users (adjust as needed)
 -- create policy authenticated_read_pdf_assets on public.pdf_assets
 --   for select to authenticated using (active = true);
-

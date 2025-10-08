@@ -158,7 +158,7 @@ async def admin_logout(response: Response):
 
 
 @router.get("/pdfs")
-async def admin_list_pdfs(request: Request, group: Optional[str] = None, limit: int = 50, offset: int = 0):
+async def admin_list_pdfs(request: Request, module: Optional[str] = None, lesson: Optional[str] = None, limit: int = 50, offset: int = 0):
     _ = require_admin(request)
     try:
         from supabase import create_client as _create_client
@@ -166,12 +166,17 @@ async def admin_list_pdfs(request: Request, group: Optional[str] = None, limit: 
         admin = _create_client(supabase_url, service_key)
         q = (
             admin.table("pdf_assets")
-            .select("id,group_key,bucket,path,label,order_index,is_default,score_min,score_max,active,created_at,updated_at")
-            .order("group_key", desc=False)
-            .order("order_index", desc=False)
+            .select("id,module,lesson,path,is_default,score_min,score_max,active,created_at,updated_at")
+            .order("module", desc=False)
+            .order("lesson", desc=False)
+            .order("path", desc=False)
         )
-        if group:
-            q = q.eq("group_key", group)
+        module_filter = (module or "").strip()
+        lesson_filter = (lesson or "").strip()
+        if module_filter:
+            q = q.eq("module", module_filter)
+        if lesson_filter:
+            q = q.eq("lesson", lesson_filter)
         if offset:
             q = q.range(offset, offset + max(0, int(limit)) - 1)
         else:
@@ -192,6 +197,14 @@ async def admin_create_pdf(request: Request, body: PdfAssetCreate):
         _public, service_key, supabase_url = build_supabase_public()
         admin = _create_client(supabase_url, service_key)
         payload = body.dict()
+        module_value = (payload.get("module") or "").strip()
+        path_value = (payload.get("path") or "").strip()
+        lesson_value = payload.get("lesson")
+        if not module_value or not path_value:
+            raise HTTPException(status_code=400, detail="module and path are required")
+        payload["module"] = module_value
+        payload["path"] = path_value
+        payload["lesson"] = (lesson_value or "").strip() or None
         res = admin.table("pdf_assets").insert(payload).execute()
         data = getattr(res, "data", None) or []
         return {"item": data[0] if data else None}
@@ -207,9 +220,22 @@ async def admin_update_pdf(item_id: str, request: Request, body: PdfAssetUpdate)
         from supabase import create_client as _create_client
         _public, service_key, supabase_url = build_supabase_public()
         admin = _create_client(supabase_url, service_key)
-        update = {k: v for k, v in body.dict().items() if v is not None}
+        update = body.dict(exclude_unset=True)
         if not update:
             return {"item": None}
+        if "module" in update:
+            update_module = (update.get("module") or "").strip()
+            if not update_module:
+                raise HTTPException(status_code=400, detail="module cannot be empty")
+            update["module"] = update_module
+        if "lesson" in update:
+            lesson_val = update.get("lesson")
+            update["lesson"] = (lesson_val or "").strip() or None
+        if "path" in update:
+            update_path = (update.get("path") or "").strip()
+            if not update_path:
+                raise HTTPException(status_code=400, detail="path cannot be empty")
+            update["path"] = update_path
         res = admin.table("pdf_assets").update(update).eq("id", item_id).execute()
         data = getattr(res, "data", None) or []
         return {"item": data[0] if data else None}
@@ -238,8 +264,8 @@ async def admin_delete_pdf(item_id: str, request: Request):
 @router.post("/upload-url")
 async def admin_create_upload_url(
     request: Request,
-    bucket: str = Form(...),
-    dest_path: str = Form(""),
+    module: str = Form(...),
+    lesson: str = Form(""),
     filename: str = Form(...),
 ):
     """Return a signed upload URL and token for direct browser upload.
@@ -249,16 +275,19 @@ async def admin_create_upload_url(
     _ = require_admin(request)
     try:
         _public, service_key, supabase_url = build_supabase_public()
+        module_name = (module or "").strip()
+        if not module_name:
+            raise HTTPException(status_code=400, detail="module is required")
         safe_name = filename.split("/")[-1]
-        dp = (dest_path or "").strip()
-        if dp.endswith("/") or dp == "":
-            final_path = (dp + safe_name).lstrip("/")
+        lp = (lesson or "").strip()
+        if lp.endswith("/") or lp == "":
+            final_path = (lp + safe_name).lstrip("/")
         else:
-            final_path = dp.lstrip("/")
-        info = create_signed_upload_url(supabase_url, service_key, bucket, final_path)
+            final_path = lp.lstrip("/")
+        info = create_signed_upload_url(supabase_url, service_key, module_name, final_path)
         if not info:
             raise HTTPException(status_code=500, detail="Failed to create signed upload URL")
-        return {"bucket": bucket, "path": final_path, **info}
+        return {"module": module_name, "path": final_path, **info}
     except HTTPException:
         raise
     except Exception as e:

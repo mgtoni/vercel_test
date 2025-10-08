@@ -8,15 +8,18 @@ logger = logging.getLogger("api3.user_content")
 
 def fetch_pdfs_from_manifest(
     *,
-    group: str,
+    module: str,
+    lesson: Optional[str] = None,
     score: Optional[int] = None,
     limit: int = 10,
     expires_in: int = 1800,
 ) -> List[Dict]:
-    """Query `pdf_assets` manifest by group (and optional score), return signed URLs."""
+    """Query `pdf_assets` manifest by module (and optional lesson/score), return signed URLs."""
     from supabase import create_client as _create_client
 
-    if not group:
+    module = (module or "").strip()
+    lesson = (lesson or "").strip() if lesson is not None else None
+    if not module:
         return []
     try:
         _public, service_key, supabase_url = build_supabase_public()
@@ -27,11 +30,16 @@ def fetch_pdfs_from_manifest(
         q = (
             admin
             .table("pdf_assets")
-            .select("id,bucket,path,label,order_index,is_default,score_min,score_max,active")
-            .eq("group_key", group)
+            .select("id,module,lesson,path,is_default,score_min,score_max,active")
+            .eq("module", module)
             .eq("active", True)
-            .order("order_index", desc=False)
+            .order("lesson", desc=False)
+            .order("path", desc=False)
         )
+
+        lesson_filter = (lesson or "").strip()
+        if lesson_filter:
+            q = q.eq("lesson", lesson_filter)
 
         if score is None:
             q = q.eq("is_default", True)
@@ -46,18 +54,17 @@ def fetch_pdfs_from_manifest(
         items = getattr(res, "data", None) or []
         out: List[Dict] = []
         for it in items:
-            b = it.get("bucket")
+            mod = it.get("module") or module
             p = it.get("path")
-            url = create_signed_storage_url(supabase_url, service_key, b, p, expires_in)
+            url = create_signed_storage_url(supabase_url, service_key, mod, p, expires_in)
             if not url:
                 continue
             out.append({
                 "id": it.get("id"),
-                "label": it.get("label") or p,
-                "bucket": b,
+                "module": mod,
+                "lesson": it.get("lesson"),
                 "path": p,
                 "signed_url": url,
-                "order_index": it.get("order_index") or 0,
                 "is_default": bool(it.get("is_default")),
                 "score_min": it.get("score_min"),
                 "score_max": it.get("score_max"),

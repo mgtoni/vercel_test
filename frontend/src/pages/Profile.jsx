@@ -11,10 +11,10 @@ function Profile() {
   const location = useLocation();
 
   useEffect(() => {
-    // Load default manifest PDFs for 'profile' group (first item used)
+    // Load default manifest PDFs for 'profile' module (first item used)
     (async () => {
       try {
-        const res = await fetch(`/api/pdfs?group=profile`, { credentials: "same-origin" });
+        const res = await fetch(`/api/pdfs?module=profile`, { credentials: "same-origin" });
         if (!res.ok) return;
         const data = await res.json();
         const first = (data.items || [])[0];
@@ -27,7 +27,7 @@ function Profile() {
 
   const loadScorePdf = async (score, setter) => {
     try {
-      const res = await fetch(`/api/pdfs?group=profile&score=${encodeURIComponent(score)}&limit=1`, {
+      const res = await fetch(`/api/pdfs?module=profile&score=${encodeURIComponent(score)}&limit=1`, {
         credentials: "same-origin",
       });
       if (!res.ok) return;

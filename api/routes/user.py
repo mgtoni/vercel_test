@@ -290,13 +290,15 @@ async def get_profile(req: ProfileReq, request: Request):
 
 
 @router.get("/pdfs")
-async def list_pdfs(group: str, score: Optional[int] = None, limit: int = 10):
+async def list_pdfs(module: str, lesson: Optional[str] = None, score: Optional[int] = None, limit: int = 10):
+    if not module:
+        raise HTTPException(status_code=400, detail="module is required")
     try:
         limit = max(1, min(int(limit or 10), 100))
     except Exception:
         limit = 10
     try:
-        items = fetch_pdfs_from_manifest(group=group, score=score, limit=limit)
+        items = fetch_pdfs_from_manifest(module=module, lesson=lesson, score=score, limit=limit)
         return {"items": items}
     except Exception as e:
         logger.info(f"/pdfs manifest error: {e}")
