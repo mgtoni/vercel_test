@@ -83,10 +83,17 @@ async def handle_admin_upload(request: Request) -> Dict[str, str]:
         if not module or not filename:
             raise HTTPException(status_code=400, detail="module and filename are required")
         safe_name = filename.split("/")[-1]
-        if lesson.endswith("/") or lesson == "":
-            final_path = (lesson + safe_name).lstrip("/")
+        prefix = lesson.strip("/ ")
+        if prefix:
+            segments = prefix.split("/")
+            last_segment = segments[-1]
+            if "." in last_segment:
+                final_path = prefix
+            else:
+                final_path = "/".join(filter(None, [prefix, safe_name]))
         else:
-            final_path = lesson.lstrip("/")
+            final_path = safe_name
+        final_path = final_path.lstrip("/")
         _public, service_key, supabase_url = build_supabase_public()
         info = create_signed_upload_url(supabase_url, service_key, module, final_path)
         if not info:
