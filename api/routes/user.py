@@ -35,6 +35,17 @@ async def _proxy_admin_pdfs_request(target: str, request: Request):
     if len(parts) < 2 or parts[0] != 'admin' or parts[1] != 'pdfs':
         raise HTTPException(status_code=404, detail="Not found")
     method = request.method.upper()
+    if method == 'OPTIONS':
+        return Response(status_code=204, headers={"Allow": "GET,POST,PUT,DELETE,OPTIONS"})
+    if method == 'HEAD':
+        module = request.query_params.get('module')
+        lesson = request.query_params.get('lesson')
+        try:
+            limit_val = int(request.query_params.get('limit', 1))
+        except Exception:
+            limit_val = 1
+        await _admin_list_pdfs(request, module=module, lesson=lesson, limit=limit_val, offset=0)
+        return Response(status_code=200)
     if len(parts) == 2:
         if method == 'GET':
             module = request.query_params.get('module')
