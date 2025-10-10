@@ -147,7 +147,10 @@ def create_signed_upload_url(supabase_url: str, service_key: str, bucket: str, p
         signed_url = getattr(res, "signed_url", None) or (res.get("signed_url") if isinstance(res, dict) else None)
         token = getattr(res, "token", None) or (res.get("token") if isinstance(res, dict) else None)
         if signed_url and token:
-            return {"signed_url": signed_url, "token": token}
+            absolute_url = signed_url
+            if isinstance(absolute_url, str) and absolute_url.startswith("/"):
+                absolute_url = f"{supabase_url.rstrip('/')}{absolute_url}"
+            return {"signed_url": absolute_url, "token": token}
     except Exception as e:
         logger.info(f"Signed upload URL generation failed for {bucket}/{path}: {e}")
     return None

@@ -267,10 +267,17 @@ export default function AdminPdfs() {
                 if (!up.ok) throw new Error(await up.text());
                 const upData = await up.json();
 
-                const putRes = await fetch(upData.signed_url, {
-                  method: 'PUT',
-                  headers: { 'Content-Type': upload.file.type || 'application/pdf' },
-                  body: upload.file,
+                const uploadUrl = upData.signed_url;
+                const uploadToken = upData.token;
+                if (!uploadUrl || !uploadToken) {
+                  throw new Error('Signed upload URL missing token');
+                }
+                const form = new FormData();
+                form.append('token', uploadToken);
+                form.append('file', upload.file, upload.file.name);
+                const putRes = await fetch(uploadUrl, {
+                  method: 'POST',
+                  body: form,
                 });
                 if (!putRes.ok) throw new Error(`Upload to storage failed: ${putRes.status}`);
 
