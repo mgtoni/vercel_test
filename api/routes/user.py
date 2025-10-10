@@ -2,16 +2,71 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from ..models import AuthData, ProfileReq, AdminLoginRequest, AdminPasswordResetRequest
+from ..models import (
+    AuthData,
+    ProfileReq,
+    AdminLoginRequest,
+    AdminPasswordResetRequest,
+    PdfAssetCreate,
+    PdfAssetUpdate,
+)
 from ..utils.core_supabase import build_supabase_public, admin_get_user_by_email_rest, fetch_profile_admin_sdk
 from ..utils.admin_checks import handle_admin_upload, normalize_admin_path
 from ..utils.crypto_utils import decrypt_auth_payload, aesgcm_encrypt_profile, mask_email_for_log
 from ..utils.common import normalize_email
 from ..utils.user_content import fetch_pdfs_from_manifest
-from .admin import admin_login as _admin_login_handler, admin_update_password as _admin_update_password_handler, admin_logout as _admin_logout_handler
+from .admin import (
+    admin_login as _admin_login_handler,
+    admin_update_password as _admin_update_password_handler,
+    admin_logout as _admin_logout_handler,
+    admin_list_pdfs as _admin_list_pdfs,
+    admin_create_pdf as _admin_create_pdf,
+    admin_update_pdf as _admin_update_pdf,
+    admin_delete_pdf as _admin_delete_pdf,
+)
 
 router = APIRouter()
 logger = logging.getLogger("api3.routes.user")
+
+
+async def _proxy_admin_pdfs_request(target: str, request: Request):
+    fragment = normalize_admin_path(target)
+    parts = [segment for segment in fragment.split('/') if segment]
+    if len(parts) < 2 or parts[0] != 'admin' or parts[1] != 'pdfs':
+        raise HTTPException(status_code=404, detail="Not found")
+    method = request.method.upper()
+    if len(parts) == 2:
+        if method == 'GET':
+            module = request.query_params.get('module')
+            lesson = request.query_params.get('lesson')
+            try:
+                limit_val = int(request.query_params.get('limit', 50))
+            except Exception:
+                limit_val = 50
+            try:
+                offset_val = int(request.query_params.get('offset', 0))
+            except Exception:
+                offset_val = 0
+            return await _admin_list_pdfs(request, module=module, lesson=lesson, limit=limit_val, offset=offset_val)
+        if method == 'POST':
+            try:
+                payload = await request.json()
+            except Exception:
+                raise HTTPException(status_code=400, detail='Invalid JSON body')
+            data = PdfAssetCreate(**payload)
+            return await _admin_create_pdf(request, data)
+    if len(parts) == 3:
+        item_id = parts[2]
+        if method == 'PUT':
+            try:
+                payload = await request.json()
+            except Exception:
+                raise HTTPException(status_code=400, detail='Invalid JSON body')
+            data = PdfAssetUpdate(**payload)
+            return await _admin_update_pdf(item_id=item_id, request=request, body=data)
+        if method == 'DELETE':
+            return await _admin_delete_pdf(item_id=item_id, request=request)
+    raise HTTPException(status_code=405, detail='Method not allowed for admin/pdfs')
 
 
 @router.get("/")
@@ -201,6 +256,8 @@ async def auth_root(request: Request, response: Response):
         return await _admin_update_password_handler(data, response)
     if qp == "admin/logout":
         return await _admin_logout_handler(response)
+    if qp.startswith("admin/pdfs"):
+        return await _proxy_admin_pdfs_request(qp, request)
     if qp.startswith("admin"):
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -229,6 +286,9 @@ async def auth_any_path(_path: str, request: Request, response: Response):
         return await _admin_update_password_handler(data, response)
     if normalized_path == "admin/logout" or qp_normalized == "admin/logout":
         return await _admin_logout_handler(response)
+    if normalized_path.startswith("admin/pdfs") or qp_normalized.startswith("admin/pdfs"):
+        target = qp_normalized if qp_normalized.startswith("admin/pdfs") else normalized_path
+        return await _proxy_admin_pdfs_request(target, request)
     if normalized_path.startswith("admin") or qp_normalized.startswith("admin"):
         raise HTTPException(status_code=404, detail="Not found")
     try:
@@ -240,7 +300,12 @@ async def auth_any_path(_path: str, request: Request, response: Response):
 
 
 @router.get("/{_path:path}")
-async def get_any_path(_path: str):
+async def get_any_path(_path: str, request: Request):
+    normalized_path = normalize_admin_path(_path)
+    qp_normalized = normalize_admin_path(request.query_params.get("path"))
+    if normalized_path.startswith("admin/pdfs") or qp_normalized.startswith("admin/pdfs"):
+        target = qp_normalized if qp_normalized.startswith("admin/pdfs") else normalized_path
+        return await _proxy_admin_pdfs_request(target, request)
     return {"route": _path or "/", "message": "FastAPI index3 alive"}
 
 
